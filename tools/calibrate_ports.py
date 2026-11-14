@@ -1,4 +1,5 @@
-"""Measure port positions on OUR shield: click each port on a rectified top-down view.
+"""
+Measure port positions on OUR shield: click each port on a rectified top-down view.
 
     python -m tools.calibrate_ports [--camera 0]
 

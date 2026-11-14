@@ -1,4 +1,5 @@
-"""Speech out (blind mode): rate limiting, TTS, pre-rendered clips, proximity beeps.
+"""
+Speech out (blind mode): rate limiting, TTS, pre-rendered clips, proximity beeps.
 
 SpeechScheduler is pure logic (testable): one steering instruction per ~0.8 s,
 latest-wins for steering, nothing dropped for informational lines, and no
@@ -76,8 +77,52 @@ def tone_wav(freq_hz: float, ms: int = 60, rate: int = 16000, volume: float = 0.
     return buf.getvalue()
 
 
+def _sapi_renderer():
+    """Direct Windows SAPI file rendering (~0.05 s a clip). Must be created on the thread that uses it."""
+    import sys
+
+    if sys.platform != "win32":
+        return None
+    try:
+        import comtypes
+        import comtypes.client
+
+        comtypes.CoInitialize()
+        voice = comtypes.client.CreateObject("SAPI.SpVoice")
+        from comtypes.gen import SpeechLib
+    except Exception as e:
+        log.warning("Direct SAPI unavailable (%s); using pyttsx3 for clips", e)
+        return None
+
+    def render(text: str, path: Path) -> None:
+        tmp = path.with_suffix(".tmp.wav")
+        stream = comtypes.client.CreateObject("SAPI.SpFileStream")
+        stream.Open(str(tmp), SpeechLib.SSFMCreateForWrite)
+        try:
+            voice.AudioOutputStream = stream
+            voice.Speak(text)
+        finally:
+            stream.Close()
+        tmp.replace(path)  # never leave a half-written clip in the cache
+
+    return render
+
+
 class TTSWorker:
     """Single thread that owns the pyttsx3 engine; speaks locally and/or renders WAV clips."""
+
+    _shared: dict = {}
+    _shared_lock = threading.Lock()
+
+    @classmethod
+    def shared(cls, cache_dir: Path, speak_locally: bool = True) -> "TTSWorker":
+        """One worker per process: pyttsx3.init() returns a process-wide engine, and driving it
+        from two threads at once (e.g. two LiveKit jobs) deadlocks the Windows SAPI driver."""
+        key = (str(cache_dir), speak_locally)
+        with cls._shared_lock:
+            if key not in cls._shared:
+                cls._shared[key] = cls(cache_dir, speak_locally=speak_locally)
+            return cls._shared[key]
 
     def __init__(self, cache_dir: Path, rate_wpm: int = 185, speak_locally: bool = True):
         self.cache_dir = Path(cache_dir)
@@ -98,6 +143,7 @@ class TTSWorker:
         except Exception as e:  # no TTS backend on this machine: degrade to printing
             log.warning("pyttsx3 unavailable (%s); speech will be printed only", e)
             engine = None
+        sapi = _sapi_renderer()  # Windows: pyttsx3's save_to_file hangs after the first clip
         while True:
             kind, text, reply = self.jobs.get()
             try:
@@ -109,7 +155,9 @@ class TTSWorker:
                         engine.runAndWait()
                 elif kind == "render":
                     path = self.clip_path(text)
-                    if not path.exists() and engine is not None:
+                    if not path.exists() and sapi is not None:
+                        sapi(text, path)
+                    elif not path.exists() and engine is not None:
                         engine.save_to_file(text, str(path))
                         engine.runAndWait()
                     reply.put(path.read_bytes() if path.exists() else None)

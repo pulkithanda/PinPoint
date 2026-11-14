@@ -1,4 +1,5 @@
-"""Step engine: deterministic state machine that turns observations into instructions.
+"""
+Step engine: deterministic state machine that turns observations into instructions
 
 Inputs (all plain data, so this runs identically on a webcam, a FaceTime call,
 or a terminal simulation):
@@ -104,31 +105,62 @@ class RequestPlugCheck:
 
 
 @dataclass
+class RequestAnswer:
+    question: str
+    context: str
+
+
+@dataclass
 class Finished:
     recap: str
 
 
-Action = Union[Say, Beep, RequestIdentify, RequestPlugCheck, Finished]
+Action = Union[Say, Beep, RequestIdentify, RequestPlugCheck, RequestAnswer, Finished]
+
+_QUESTION_WORDS = {"what", "where", "which", "how", "why", "is", "are", "can", "does", "do",
+                   "should", "did", "will", "could", "would", "who"}
+
+
+def _norm(text: str) -> str:
+    return " ".join(text.lower().replace("?", " ").replace(".", " ").replace(",", " ").replace("!", " ").split())
+
+
+def is_question(text: str) -> bool:
+    t = _norm(text)
+    return bool(t) and (text.strip().endswith("?") or t.split()[0] in _QUESTION_WORDS)
 
 
 def parse_command(text: str) -> str | None:
-    """Map a transcript (or typed iMessage) to an engine command."""
-    t = " ".join(text.lower().replace("?", " ").replace(".", " ").replace(",", " ").split())
+    """Map a transcript (or typed iMessage) to an engine command. Longer free-form
+    sentences return None so they can be answered as questions instead."""
+    t = _norm(text)
     if not t:
         return None
-    table = [
-        ("voice", ("voice mode", "voice")),
-        ("visual", ("visual mode", "visual", "caption", "deaf mode")),
-        ("holding", ("what am i holding", "what is this", "what's this", "holding", "identify")),
-        ("back", ("go back", "back", "previous", "undo")),
+    phrases = [
+        ("voice", ("voice mode",)),
+        ("visual", ("visual mode", "deaf mode", "caption mode")),
+        ("holding", ("what am i holding", "what is this", "what's this", "what is it")),
+        ("back", ("go back",)),
+        ("repeat", ("say again", "say that again", "repeat that")),
+    ]
+    for cmd, keys in phrases:
+        if t in keys:  # exact, so "what is this cable for?" stays a question
+            return cmd
+    if len(t.split()) > 4:
+        return None
+    words = [
+        ("voice", ("voice",)),
+        ("visual", ("visual", "captions")),
+        ("holding", ("holding", "identify")),
+        ("back", ("back", "previous", "undo")),
         ("skip", ("skip",)),
-        ("repeat", ("repeat", "say again", "again", "what")),
-        ("help", ("help", "where is", "where's", "describe")),
+        ("repeat", ("repeat", "again", "what")),
+        ("help", ("help", "describe", "hint")),
         ("done", ("done", "plugged", "it's in", "finished", "check", "clicked")),
         ("next", ("next", "continue", "ready", "got it", "okay", "ok")),
     ]
-    for cmd, keys in table:
-        if any(k == t or t.startswith(k + " ") or f" {k} " in f" {t} " for k in keys):
+    for cmd, keys in words:
+        if any(k == t or (k != "what" and (t.startswith(k + " ") or f" {k} " in f" {t} ")) for k in keys):
             return cmd
     return None
 
@@ -136,14 +168,16 @@ def parse_command(text: str) -> str | None:
 # ---------------------------------------------------------------- engine
 class GuidanceEngine:
     def __init__(self, project: Project, layout: ShieldLayout, *, mode: str = "",
-                 verifier_available: bool = True, place_then_check: bool = False,
+                 verifier_available: bool = True, steering: bool = True,
                  sonify: bool = False, hand_gone_check_s: float = 2.0, clock=time.monotonic):
+        """steering=True: phone on a stand, steer the fingertip every frame ("live").
+        steering=False: snapshot mode - describe ports by touch, take a photo on demand to check."""
         project.validate(layout)
         self.project = project
         self.layout = layout
         self.mode = mode if mode in ("voice", "visual") else ""
         self.verifier_available = verifier_available
-        self.place_then_check = place_then_check
+        self.steering = steering
         self.sonify = sonify
         self.hand_gone_check_s = hand_gone_check_s
         self.clock = clock
@@ -164,6 +198,7 @@ class GuidanceEngine:
         self._away_since: float | None = None
         self._last_identify_t = -1e9
         self._identify_pending = False
+        self._identify_fails = 0
         self._check_pending = False
         self._check_retries = 0
         self._throttle: dict[str, float] = {}
@@ -237,6 +272,8 @@ class GuidanceEngine:
             return self._advance(skipped=True)
         if cmd in ("next", "done"):
             if self.phase == Phase.FIND_MODULE:
+                if not self.steering and self.verifier_available and self._identify_fails < 2:
+                    return self._request_identify(force=True)  # snapshot mode: "ready" -> take a photo
                 return self._enter_guide(confirmed_by_user=True)
             if self.phase == Phase.GUIDE:
                 return self._start_check()
@@ -249,7 +286,8 @@ class GuidanceEngine:
         if obs.gesture:
             acts += self._on_gesture(obs.gesture)
         if self.phase == Phase.FIND_MODULE:
-            if obs.fingertip_mm is not None and self.verifier_available and obs.t - self._last_identify_t > 4.0:
+            if self.steering and obs.fingertip_mm is not None and self.verifier_available \
+                    and obs.t - self._last_identify_t > 4.0:
                 acts += self._request_identify()
         elif self.phase == Phase.GUIDE:
             acts += self._guide(obs)
@@ -266,11 +304,37 @@ class GuidanceEngine:
             self._log("found", f"Picked up {s.spoken_module}")
             return self._enter_guide()
         if res.module == "unknown":
+            self._identify_fails += 1
+            if not self.steering:
+                if self._identify_fails >= 2:
+                    return [self._say("I still can't read the label, so I'll trust you on this one. "
+                                      "Say 'ready' to carry on.")]
+                return [self._say("I couldn't read the label. Turn the printed name toward the phone "
+                                  "and say 'ready' again.")]
             if self._throttled("unknown_module", 8.0, self.clock()):
                 return []
             return [self._say("I can't tell which module that is yet. Hold it flat, with the printed name toward the camera.")]
         self._log("mistake", f"Picked up the {res.module} instead of {s.spoken_module}")
-        return [self._say(f"That's the {res.module}. Put it down and find {s.spoken_module}.", "urgent")]
+        again = " Say 'ready' when you have it." if not self.steering else ""
+        return [self._say(f"That's the {res.module}. Put it down and find {s.spoken_module}.{again}", "urgent")]
+
+    def on_question(self, question: str) -> list[Action]:
+        """Free-form question ("is this the right way round?") -> photo -> Claude answers."""
+        if not self.verifier_available:
+            return [self._say("I can only answer questions about what I see when the vision model is on. "
+                              "Try 'repeat' or 'help'.")]
+        s = self.step
+        context = (f"They are building a {self.project.title} on an Arduino with a Grove Base Shield. "
+                   + (f"Current step: plug the {s.module} into {', '.join(self.free_targets())}. " if s else "")
+                   + (f"Already connected: {', '.join(f'{m} in {p}' for p, m in self.occupied.items())}."
+                      if self.occupied else ""))
+        self._log("question", question)
+        return [RequestAnswer(question, context)]
+
+    def on_answer(self, answer: str | None) -> list[Action]:
+        if not answer:
+            return [self._say("Sorry, I couldn't work that out from the photo. Try asking again.")]
+        return [self._say(answer)]
 
     def on_plug_result(self, res: PlugCheck) -> list[Action]:
         self._check_pending = False
@@ -352,9 +416,13 @@ class GuidanceEngine:
     def _enter_find(self) -> list[Action]:
         self._enter(Phase.FIND_MODULE)
         s = self.step
+        self._identify_fails = 0
+        find = s.find if self.steering else s.find.replace(" Hold it up to the camera.", "")
         if not self.verifier_available:
-            return [self._say(f"{s.find} Say 'next' when you have it.")]
-        return [self._say(s.find)]
+            return [self._say(f"{find} Say 'next' when you have it.")]
+        if not self.steering:
+            return [self._say(f"{find} Say 'ready' when you have it, and I'll take a look.")]
+        return [self._say(find)]
 
     def _enter_guide(self, confirmed_by_user: bool = False) -> list[Action]:
         s = self.step
@@ -365,12 +433,12 @@ class GuidanceEngine:
         self._check_retries = 0
         lead = "Okay." if confirmed_by_user else f"That's {s.spoken_module}."
         text = f"{lead} {s.say}"
-        if self.mode == "voice" or self.place_then_check:
+        if self.mode == "voice" or not self.steering:
             text += " " + self.layout.tactile_hint(self.free_targets()[0])
         if s.tip:
             text += " " + s.tip
-        if self.place_then_check:
-            text += " Say 'done' when it clicks."
+        if not self.steering:
+            text += " Say 'done' when it clicks, and I'll take a photo to check."
         return [self._say(text)]
 
     def _start_check(self, retry: bool = False) -> list[Action]:
@@ -435,7 +503,7 @@ class GuidanceEngine:
     # ------------------------------------------------------------ steering
     def _guide(self, obs: Observation) -> list[Action]:
         now = obs.t
-        if self.place_then_check:
+        if not self.steering:
             return []
         if not obs.shield_ok:
             if self._throttled("no_board", 6.0, now):

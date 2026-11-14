@@ -19,7 +19,12 @@ def _load_dotenv() -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+        value = value.strip()
+        if value[:1] in ('"', "'") and value[0] in value[1:]:
+            value = value[1:value.index(value[0], 1)]       # quoted: keep everything inside
+        else:
+            value = value.split(" #", 1)[0].split("\t#", 1)[0].strip()  # drop inline comments
+        os.environ.setdefault(key.strip(), value)
 
 _load_dotenv()
 
@@ -58,5 +63,16 @@ class Settings:
 
     # Modes
     mode: str = field(default_factory=lambda: _env("PINPOINT_MODE", ""))  # "", "voice" or "visual"
-    place_then_check: bool = field(default_factory=lambda: _env_bool("PINPOINT_PLACE_THEN_CHECK", False))
+    # "snapshot": the phone stays on the FaceTime call but is put down; Pinpoint asks the builder
+    #             to hold it up when it needs to look, and auto-captures a sharp, steady frame.
+    # "live":     the phone sits on an overhead stand and Pinpoint steers the hand every frame.
+    guidance: str = field(default_factory=lambda: _env("PINPOINT_GUIDANCE", "snapshot"))
+    capture_timeout_s: float = 15.0
     sonify: bool = field(default_factory=lambda: _env_bool("PINPOINT_SONIFY", False))
+
+    # Speech in (Chert has no transcription): local faster-whisper on the caller's audio
+    stt_model: str = field(default_factory=lambda: _env("PINPOINT_STT_MODEL", "base.en"))
+
+    @property
+    def live_steering(self) -> bool:
+        return self.guidance == "live"

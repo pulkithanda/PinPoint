@@ -1,4 +1,6 @@
-"""Download the MediaPipe gesture recognizer model (hand landmarks + gestures)."""
+"""
+Download the MediaPipe gesture recognizer model (hand landmarks + gestures)
+"""
 from __future__ import annotations
 
 import urllib.request

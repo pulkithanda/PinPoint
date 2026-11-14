@@ -1,4 +1,6 @@
-"""Step through the proximity alert build with fake fingertip input."""
+"""
+Step through the proximity alert build with fake fingertip input.
+"""
 import pytest
 
 from backend.config import Settings

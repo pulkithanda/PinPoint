@@ -1,4 +1,6 @@
-"""ArUco -> homography -> port map, on a synthetic camera image with perspective."""
+"""
+ArUco -> homography -> port map, on a synthetic camera image with perspective
+"""
 import cv2
 import numpy as np
 import pytest

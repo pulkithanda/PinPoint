@@ -1,83 +1,124 @@
 # Pinpoint
 
-A FaceTime call that guides your hands, so blind and Deaf makers can build electronics with a standard starter kit.
+A FaceTime call that guides your hands, so blind and Deaf makers can build electronics with a standard starter kit (Arduino + Grove Base Shield). Our EmoryHacks 2026 project.
 
-Pinpoint watches your hands over a video call and steers you, plug by plug, to the right port on an Arduino + Grove Base Shield. Blind makers get spoken directions ("right two ports... down one... stop, that's D7, plug it in"). Deaf makers get the target port circled, an arrow, and big captions. You don't need any special hardware.
+## How a build goes
 
-Our EmoryHacks 2026 project.
+You FaceTime Pinpoint and keep the call open the whole time. The phone doesn't need a stand.
 
-## How it works
+1. **Pinpoint tells you what to pick up and where it goes, by touch.** For example: "Plug the distance sensor into D7. It's in the third row back from the edge nearest you, the second port from the left."
+2. **When it needs to see something, it asks you to hold up the phone.** For example: "Pick up the phone and hold it about a hand's width above D7."
+   - Pinpoint takes the photo automatically once the picture is steady and sharp.
+   - If it can see the board's corner markers, it tells you how to aim: "Move the phone a little to your left."
+   - Then it says "Got it. You can put the phone down."
+3. **Claude checks the photo.** It confirms the right module, or that the cable is in the right port. If you used the wrong port, Pinpoint says something like "That looks like D8, not D6."
+4. **You can ask questions at any time**, by voice or iMessage. For example, "is this plugged in the right way round?" Pinpoint asks for a photo and answers.
+5. **After the last plug, you connect the USB cable.** Pinpoint reads the Arduino's sensor values and says "It works!" Then a recap arrives by iMessage.
 
-```
-FaceTime call ──► chert_adapter ──► Session (one per call)
-                                     │
-             every frame (fast path) ├─ vision/shield.py   ArUco markers → homography → port map (mm)
-                                     ├─ vision/hands.py    MediaPipe fingertip (landmark 8) + gestures
-                                     ├─ guidance/engine.py step state machine → "left two ports"
-                                     ├─ guidance/speech.py rate-limited TTS (blind mode)
-                                     └─ guidance/overlay.py port highlight + arrow + captions (Deaf mode)
-             on demand (slow path)   ├─ vision/verify.py   Claude: "which module is this?", "is it in D7?"
-             after the last plug     └─ hardware/serial_monitor.py  dist=… readings from the Arduino
-```
+There are two output modes:
+- **Voice mode** (blind and low-vision): spoken directions.
+- **Visual mode** (Deaf and hard of hearing): big captions burned into Pinpoint's FaceTime video, with the target port highlighted. Thumbs-up means next, an open palm means repeat.
 
-The geometry path steers your hand on every frame. The vision LLM only checks a placement or identifies a part, and it runs on a worker thread, so slow AI calls never hold up guidance.
+`PINPOINT_GUIDANCE=live` switches to the original design: the phone sits on an overhead stand, and Pinpoint steers your fingertip in real time ("right two ports… stop, that's D7").
 
-## Setup
+## Code map
 
+| Path | What it does |
+|---|---|
+| `backend/main.py` | FastAPI server: Chert webhooks (`/chert/webhook`, `/chert/imessage/webhook`), dashboard, commands |
+| `backend/chert_adapter.py` | **The only file that talks to Chert:** accepts `call.incoming` with LiveKit tokens; iMessage send, attachments, inbound signature check |
+| `backend/chert_agent.py` | The LiveKit agent worker that `chert dev` dispatches into each call (greets on `chert_bridge_ready`), plus the dashboard |
+| `backend/livekit_transport.py` | Call media: joins the call's LiveKit room, reads the caller's video and audio tracks, publishes Pinpoint's voice and a captioned video track |
+| `backend/session.py` | One session per call: frame loop, photo on demand, Claude jobs, speech and captions |
+| `backend/stt.py` | Speech-to-text with local faster-whisper (Chert has no transcription) |
+| `backend/vision/capture.py` | Picks the steady, sharp frame and gives aiming hints |
+| `backend/vision/shield.py` | Corner markers → board position → port map (`shield_layout.yaml`) |
+| `backend/vision/hands.py` | MediaPipe fingertip and gestures |
+| `backend/vision/verify.py` | Claude: identify the module, check the plug, answer questions |
+| `backend/guidance/engine.py` | Step state machine, commands, recap |
+| `backend/guidance/speech.py` / `overlay.py` | Speech timing and text-to-speech / captions and on-screen highlights |
+| `backend/hardware/serial_monitor.py` | Reads `dist=… lcd=…` from the Arduino and diagnoses wrong ports |
+| `backend/projects/*.yaml` | Build steps (proximity alert; colour reader is a stretch goal) |
+| `arduino/proximity_alert/` | The sketch, uploaded before the demo |
+| `tools/` | Model download, marker PDF, port calibration, terminal simulator, `chert_setup` (check keys, register iMessage webhook), `fake_bridge` (pretend to be Chert for local tests) |
+
+## Run it with Chert, step by step
+
+How the call works ([Chert docs](https://docs.trychert.com/facetime/introduction)):
+- Chert sends a `call.incoming` webhook. Pinpoint replies "accept" with a LiveKit room and tokens.
+- Chert's bridge then joins that LiveKit room and publishes the caller's camera and mic (`facetime-remote-video`, `facetime-remote-audio`).
+- Pinpoint joins the same room. It reads those tracks and publishes its voice plus a captioned video. Chert has no captions API, so the captions live in that video.
+- The recap and typed commands go through Chert's separate Messaging (iMessage) API.
+
+**1. Install**, once per laptop:
 ```bash
 python -m venv .venv
 .venv\Scripts\activate            # macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
-python -m tools.download_models   # MediaPipe gesture recognizer (~8 MB)
-python -m tools.make_markers      # writes markers/aruco_4x4.pdf
+python -m tools.download_models   # hand-tracking model
+```
+The Whisper speech model (~140 MB) downloads on the first call.
+
+**2. Get keys and fill in `.env`** (copy `.env.example`):
+- **LiveKit:** create a free project at [cloud.livekit.io](https://cloud.livekit.io). Copy the `wss://` URL, API key and API secret.
+- **Chert FaceTime:** dashboard → Developer → Project API keys. You need the `ftk_...` key and the project ID.
+- **Chert Messaging:** the tenant signing secret, and the tenant slug if your account has several tenants.
+- **Claude:** `ANTHROPIC_API_KEY`.
+- **Recap recipient:** `CHERT_IMESSAGE_TO` = the builder's phone number. This is needed because Chert only gives a hash of the caller's number.
+
+Then run `python -m tools.chert_setup check`. It mints a test token and calls `GET /v1/lines` to prove the keys work.
+
+**3. Prepare the hardware.** See [Markers](#markers) below.
+- Upload `arduino/proximity_alert/proximity_alert.ino`. It needs the Seeed *Grove Ultrasonic Ranger* and *Grove LCD RGB Backlight* libraries.
+- Plug the Arduino's USB into this laptop.
+- Stick the markers on, then run `python -m tools.calibrate_ports`.
+
+**4 (recommended). The `chert dev` way: no tunnel, no webhook.**
+```powershell
+python -m backend.chert_agent start                                  # terminal 1: agent worker + dashboard on :8000
+npx --yes @trychert/facetime@0.1.0-beta.20 dev --agent pinpoint      # terminal 2: ADMIN PowerShell (Windows needs it)
+```
+Wait for `"pinpoint" is in a waiting room`, then make a **FaceTime Video** call to the number it prints. Skip steps 4 (webhook) and 5 below.
+
+**4 (alternative). Webhook backend and a public tunnel:**
+```bash
+python -m backend.main --source chert       # add --guidance live for the stand version
+ngrok http 8000                            # or: cloudflared tunnel --url http://localhost:8000
 ```
 
-Optional `.env` in the repo root:
+**5. Connect Chert to the tunnel:**
+- **FaceTime:** in the Chert dashboard, go to Workers & Lines → Integration. Set the HTTPS webhook to `https://<tunnel>/chert/webhook` and assign it to your line, with `customer_decides` and no default Assistant.
+- **iMessage:** run `python -m tools.chert_setup subscribe-imessage https://<tunnel>/chert/imessage/webhook`. Put the printed secret in `.env` as `CHERT_MESSAGING_WEBHOOK_SECRET`, then restart the backend.
 
-```
-ANTHROPIC_API_KEY=...             # enables module ID + plug checks (without it, plug checks fall back to the serial test)
-PINPOINT_CAMERA=0
-PINPOINT_SERIAL_PORT=auto         # or COM5 / /dev/ttyACM0 / none
-PINPOINT_MODE=                    # voice | visual | (blank = ask at the start of the call)
-PINPOINT_PLACE_THEN_CHECK=0       # 1 = fallback if Chert video is laggy
-PINPOINT_SONIFY=0                 # 1 = parking-sensor beep as the finger closes in
-```
+**6. Call.** FaceTime your Chert line, then open http://localhost:8000 to watch what Pinpoint sees. Say "voice mode" (or show a thumbs-up for visual mode), then follow the instructions. Commands: `ready`, `done`, `repeat`, `help`, `back`, `skip`, `what am I holding`, or any question, spoken or texted to the line.
 
-## Run
+**Testing without Chert:**
+- `python -m tools.fake_bridge --say "voice mode" --say "ready"` plays Chert's part against a local `livekit-server --dev`. Set `LIVEKIT_URL=ws://127.0.0.1:7880`, `LIVEKIT_API_KEY=devkey` and `LIVEKIT_API_SECRET=secret`.
+- `python -m backend.main --source webcam` runs the same flow on the laptop webcam and speakers.
+- `python -m tools.sim_terminal` steps through a build in the terminal.
+- `python -m pytest -q` runs the tests.
 
-| What | Command |
-|---|---|
-| Unit tests | `python -m pytest -q` |
-| Step through a build in the terminal with fake fingertip input | `python -m tools.sim_terminal` |
-| Live on the laptop webcam, with the dashboard at http://localhost:8000 | `python -m backend.main --source webcam` |
-| Live on a FaceTime call through Chert | `python -m backend.main --source chert`, then expose `/chert/webhook` with `ngrok http 8000` or `cloudflared` |
-| Measure the port positions on our shield | `python -m tools.calibrate_ports` |
+**Not in Chert's docs yet (ask them):**
+- the FaceTime webhook signature header
+- the call-ended event (Pinpoint detects the bridge leaving the room instead)
+- the caller's plaintext number
+- the frame rate and resolution of the caller's video
 
-In the dashboard you can send commands with the buttons or the text box: `voice mode`, `visual mode`, `what am I holding`, `done`, `repeat`, `help`, `back`, `skip`. In visual mode, a thumbs-up means next/done and an open palm means repeat.
+## Markers
 
-## Before the demo (hardware checklist)
+The four printed squares tell Pinpoint where the shield is and which way round it is, so it can find each port in a photo.
 
-1. **Flash** `arduino/proximity_alert/proximity_alert.ino`. It needs the Seeed *Grove Ultrasonic Ranger* and *Grove LCD RGB Backlight* libraries. Plug the parts in by hand once and check that the beeps, the LCD colours, and the `dist=… lcd=…` lines on the serial monitor all work.
-2. **Print** `markers/aruco_4x4.pdf` at 100% scale and check the 50 mm scale bar. Tape the markers upright on the shield corners: 0 far-left, 1 far-right, 2 near-right, 3 near-left.
-3. **Measure** the marker centres into `backend/vision/shield_layout.yaml`, then run `python -m tools.calibrate_ports` and click each port. The current port coordinates are **placeholders**.
-4. **Check the port labels** on the real shield against the sketch (sensor on D7, buzzer on D6, LCD on I2C) and against `backend/projects/proximity_alert.yaml`.
-5. Set up the overhead phone stand and the lamp. Make sure all 4 markers are visible on the dashboard.
-
-## Chert integration status
-
-`backend/chert_adapter.py` is the only file that talks to Chert. We haven't seen the Chert API yet, so the adapter assumes webhook JSON events (`call.started`, `video.frame` with a base64 JPEG, `transcript`, `call.ended`). Outgoing audio, outgoing video, and the iMessage recap are marked `TODO(chert)` and only log for now. Everything else runs today on the webcam transport.
-
-If Chert can't deliver live frames or send video back, set `PINPOINT_PLACE_THEN_CHECK=1`. Pinpoint then describes each port by touch ("the second row back from the edge nearest you, the second port from the left") and confirms each step from a snapshot plus the serial readings.
-
-## Team split
-
-| Role | Owns | First milestone |
-|---|---|---|
-| A: Chert integration | `chert_adapter.py`, `main.py`, iMessage recap | Echo test: a frame comes in and speech goes back out on a real call |
-| B: Vision | `vision/shield.py`, `vision/hands.py`, `tools/calibrate_ports.py` | The live webcam dashboard shows "Fingertip at D7" correctly |
-| C: Guidance + AI | `guidance/engine.py`, `guidance/speech.py`, `vision/verify.py`, project YAMLs | `tools.sim_terminal` runs through the whole build |
-| D: Hardware + Deaf mode + demo | Arduino sketch, `serial_monitor.py`, markers, stand, `overlay.py`, video, Devpost | The alert device works when plugged in by hand, and serial readings reach the backend |
+1. **Check the print scale.** The scale bar on the page must measure 50 mm. If it doesn't, reprint at 100% ("actual size", not "fit to page").
+2. **Cut out the four squares.** Keep the thin white border around each black square, because the detector needs that border.
+3. **Sit the board the way the builder will use it,** with the side they reach from as "near". Then attach one marker at each corner of the Grove Base Shield. Use small loops of tape behind the marker, or tape over the white border only, never over the black pattern.
+   - id 0 at the far-left corner
+   - id 1 at the far-right corner
+   - id 2 at the near-right corner
+   - id 3 at the near-left corner
+4. **Keep them flat and upright,** with the printed id label readable from the builder's seat. Don't cover any port. If the shield's corners are crowded, stick the markers on a piece of card under the Arduino, just outside each corner. They only need to stay fixed relative to the board.
+5. **Measure** the distance between marker centres in mm and enter it in `backend/vision/shield_layout.yaml` under `markers`. Marker 0 is `[0, 0]`, x goes right and y goes toward the builder.
+6. **Calibrate:** run `python -m tools.calibrate_ports`, hold the camera over the board, and click the centre of each port when prompted. Press `s` to save.
 
 ## Wording
 
-Don't say "first ever". Say "live hand guidance on standard maker hardware over a normal video call, with no extra hardware". Also say "designed with" blind and Deaf makers, not "approved by", unless a blind or Deaf user has actually tested it.
+Say "live hand guidance on standard maker hardware over a normal video call, with no extra hardware". Don't say "first ever". Say "designed with" blind and Deaf makers, not "approved by", unless a blind or Deaf user has actually tested it.

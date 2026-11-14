@@ -1,4 +1,5 @@
-"""Hand tracking: MediaPipe Gesture Recognizer (21 landmarks + gestures in one model).
+"""
+Hand tracking: MediaPipe Gesture Recognizer (21 landmarks + gestures in one model).
 
 The fingertip of the hand holding the cable (landmark 8) is transformed into
 board mm by the caller; this module also smooths it over ~5 frames and

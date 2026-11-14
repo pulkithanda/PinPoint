@@ -1,15 +1,19 @@
-"""Step through a build in the terminal with fake fingertip input (no camera, no Chert).
+"""
+Step through a build in the terminal with fake fingertip input (no camera, no Chert).
 
-    python -m tools.sim_terminal [--project proximity_alert] [--no-verifier]
+    python -m tools.sim_terminal [--project proximity_alert] [--no-verifier] [--live]
+
+Default is snapshot guidance (photo on demand); --live simulates the phone on a stand.
 
 Type engine commands (next, repeat, done, back, skip, help, voice mode, visual mode,
-what am I holding) or simulator commands:
+ready, what am I holding), a free-form question, or simulator commands:
     at D5             put the fingertip over port D5
     mm 30 25          put the fingertip at board coordinates (mm)
     gone              hand leaves the camera
     wait 2.5          advance the clock by 2.5 s (feeds frames meanwhile)
     id Buzzer         the vision LLM says the held module is "Buzzer" (or: id unknown)
     plug yes D7       plug check result: yes/no/unsure + port seen (optional)
+    answer <text>     the vision LLM's answer to a question
     usb [dist]        Arduino starts sending readings (default dist varies)
     deadsensor        Arduino sends dist=0 (sensor not on its port)
     state             print the engine state
@@ -22,7 +26,8 @@ import random
 
 from backend.config import Settings
 from backend.guidance.engine import (Beep, Finished, GuidanceEngine, Observation, Project,
-                                     RequestIdentify, RequestPlugCheck, Say, parse_command)
+                                     RequestAnswer, RequestIdentify, RequestPlugCheck, Say, is_question,
+                                     parse_command)
 from backend.hardware.serial_monitor import FakeSerialMonitor
 from backend.vision.shield import ShieldLayout
 from backend.vision.verify import ModuleID, PlugCheck
@@ -40,13 +45,15 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--project", default="proximity_alert")
     ap.add_argument("--no-verifier", action="store_true")
+    ap.add_argument("--live", action="store_true", help="live steering (phone on a stand)")
     args = ap.parse_args()
 
     s = Settings()
     layout = ShieldLayout.load(s.layout_path)
     project = Project.load(s.projects_dir / f"{args.project}.yaml")
     clock = FakeClock()
-    eng = GuidanceEngine(project, layout, verifier_available=not args.no_verifier, clock=clock)
+    eng = GuidanceEngine(project, layout, verifier_available=not args.no_verifier,
+                         steering=args.live, clock=clock)
     serial = FakeSerialMonitor()
     finger: tuple[float, float] | None = None
     usb: int | None = None  # None = unplugged, -1 = varying, 0 = dead sensor, else fixed
@@ -60,6 +67,8 @@ def main() -> None:
                 print("  [vision LLM] identify module requested -> answer with: id <module>")
             elif isinstance(a, RequestPlugCheck):
                 print(f"  [vision LLM] plug check: {a.module} in {a.ports}? -> answer with: plug yes|no|unsure [port]")
+            elif isinstance(a, RequestAnswer):
+                print(f"  [vision LLM] question: {a.question!r} -> answer with: answer <text>")
             elif isinstance(a, Finished):
                 print("\n===== iMessage recap =====\n" + a.recap + "\n==========================")
             elif isinstance(a, Beep):
@@ -116,12 +125,16 @@ def main() -> None:
             usb = 0
             for _ in range(60):
                 tick()
+        elif head == "answer":
+            show(eng.on_answer(" ".join(parts[1:]) or None))
         elif head == "state":
             print(eng.view_state())
         else:
             cmd = parse_command(line)
             if cmd:
                 show(eng.on_command(cmd))
+            elif is_question(line):
+                show(eng.on_question(line))
             else:
                 print("  (not understood)")
         if eng.phase.value == "done":

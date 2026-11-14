@@ -45,6 +45,7 @@
         <button data-cmd="voice mode">Voice mode</button>
         <button data-cmd="visual mode">Visual mode</button>
         <button data-cmd="what am I holding">What am I holding?</button>
+        <button data-cmd="ready">Ready</button>
         <button data-cmd="done">Done / check</button>
         <button data-cmd="repeat">Repeat</button>
         <button data-cmd="help">Describe port</button>
@@ -52,7 +53,7 @@
         <button data-cmd="skip">Skip</button>
         <button id="reset">Restart</button>
       </div>
-      <form id="say"><input id="text" placeholder="Type a command (e.g. next)" aria-label="Command"><button>Send</button></form>
+      <form id="say"><input id="text" placeholder="Command (ready, done) or a question" aria-label="Command or question"><button>Send</button></form>
     </div>
     <div class="panel"><ol id="log"></ol></div>
   </aside>
@@ -75,6 +76,7 @@ async function poll() {
     const ser = s.serial || {};
     $('kv').innerHTML =
       row('Mode', s.mode || 'not chosen') +
+      row('Guidance', (s.guidance || '') + (s.capturing ? ` (waiting for ${s.capturing} photo)` : ''), s.capturing ? 'warn' : '') +
       row('Phase', s.phase) +
       row('Target', (s.targets || []).join(', ')) +
       row('Fingertip at', s.finger_port, s.finger_port && (s.targets||[]).includes(s.finger_port) ? 'ok' : '') +

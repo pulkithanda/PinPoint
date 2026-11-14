@@ -1,4 +1,5 @@
-"""Visual out (Deaf / hard-of-hearing mode): port highlight, arrow, big captions.
+"""
+Visual out (Deaf / hard-of-hearing mode): port highlight, arrow, big captions.
 
 The same drawing helpers annotate frames sent to the vision LLM (port labels +
 expected port circled) and the judges' dashboard.
@@ -137,5 +138,21 @@ def draw_guidance(frame: np.ndarray, shield: ShieldTracker, state: dict,
     cv2.putText(img, f"{mode} mode  |  {state.get('phase', '').replace('_', ' ')}", (16, 60),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, YELLOW, 1, cv2.LINE_AA)
 
+    _caption_bar(img, state.get("caption", ""))
+    return img
+
+
+def caption_card(state: dict, w: int = 1280, h: int = 720) -> np.ndarray:
+    """Plain caption screen for when there is no camera picture to annotate."""
+    img = np.full((h, w, 3), (32, 28, 24), np.uint8)
+    targets = state.get("targets") or []
+    if targets:
+        big = "  ".join(t.replace("_", " ") for t in targets[:4])
+        scale = 3.0 if len(big) < 10 else 1.6
+        size = cv2.getTextSize(big, cv2.FONT_HERSHEY_SIMPLEX, scale, 6)[0]
+        cv2.putText(img, big, ((w - size[0]) // 2, h // 2 - 40), cv2.FONT_HERSHEY_SIMPLEX, scale, YELLOW, 6, cv2.LINE_AA)
+    n, i = state.get("n_steps", 0), state.get("step_index", 0)
+    header = f"{state.get('title', '')}  |  step {min(i + 1, n)}/{n}  |  {state.get('show', '')}"
+    cv2.putText(img, _ascii(header), (16, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.9, WHITE, 2, cv2.LINE_AA)
     _caption_bar(img, state.get("caption", ""))
     return img

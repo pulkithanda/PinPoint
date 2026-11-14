@@ -1,4 +1,5 @@
-"""Shield mapping: ArUco markers on the Base Shield corners -> homography -> fixed port map.
+"""
+Shield mapping: ArUco markers on the Base Shield corners -> homography -> fixed port map
 
 Pixels in the camera image are mapped into the "board frame" (millimetres, see
 shield_layout.yaml), where every port has a fixed, measured position.

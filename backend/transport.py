@@ -23,6 +23,8 @@ class CallTransport(ABC):
     #: True -> speech is played on this machine's speakers; 
     # False -> WAV bytes go down the call
     local_audio: bool = True
+    #: True -> the call shows our video to the caller (captions are burned into it)
+    wants_video: bool = False
 
     def start(self) -> None:
         pass
@@ -36,6 +38,10 @@ class CallTransport(ABC):
         return []
 
     def send_speech(self, text: str, wav: bytes | None) -> None:
+        pass
+
+    def send_caption(self, text: str) -> None:
+        """Closed caption on the call (every instruction, in both modes)."""
         pass
 
     def send_beep(self, wav: bytes) -> None:

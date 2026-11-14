@@ -1,8 +1,15 @@
 """
-One session per call: frames in -> fast geometric path -> guidance -> speech/overlay out
+One session per call: frames in -> fast geometric path -> guidance -> speech/captions out.
 
-The vision LLM (slow path) runs on a worker pool; its results are fed back to
-the engine on the next frame, so guidance never waits on it.
+Two guidance styles (PINPOINT_GUIDANCE):
+  * snapshot (default): the phone stays on the FaceTime call but is put down. When Pinpoint
+    needs to look (identify a module, check a plug, answer a question) it asks the builder to
+    hold the phone up, auto-captures a steady, sharp frame from the 15 fps stream, and says
+    "you can put the phone down".
+  * live: the phone sits on an overhead stand and the fingertip is steered every frame.
+
+The vision LLM (slow path) runs on a worker pool; its results are fed back to the engine on
+the next loop, so the call never waits on it.
 """
 from __future__ import annotations
 
@@ -18,17 +25,21 @@ import cv2
 import numpy as np
 
 from backend.config import ROOT, Settings
-from backend.guidance.engine import (Beep, Finished, GuidanceEngine, Observation, Project,
-                                     RequestIdentify, RequestPlugCheck, Say, parse_command)
-from backend.guidance.overlay import draw_guidance, draw_port_labels
+from backend.guidance.engine import (Beep, Finished, GuidanceEngine, Observation, Project, RequestAnswer,
+                                     RequestIdentify, RequestPlugCheck, Say, is_question, parse_command)
+from backend.guidance.overlay import caption_card, draw_guidance, draw_port_labels
 from backend.guidance.speech import LocalBeeper, SpeechScheduler, TTSWorker, common_phrases, tone_wav
 from backend.hardware.serial_monitor import SerialMonitor
 from backend.transport import CallTransport
+from backend.vision.capture import AutoCapture, capture_prompt
 from backend.vision.hands import GestureDebouncer, HandTracker, PointSmoother
 from backend.vision.shield import ShieldLayout, ShieldTracker
 from backend.vision.verify import ModuleID, PlugCheck, Verifier, claude_available
 
 log = logging.getLogger(__name__)
+
+PhotoRequest = RequestIdentify | RequestPlugCheck | RequestAnswer
+
 
 class Session:
     def __init__(self, transport: CallTransport, settings: Settings | None = None, project: str = "proximity_alert",
@@ -42,21 +53,21 @@ class Session:
         self.hands = hand_tracker or HandTracker(self.s.gesture_model, self.s.fingertip_landmark)
         self.smoother = PointSmoother(self.s.smoothing_frames)
         self.gestures = GestureDebouncer()
+        self.live = self.s.live_steering
 
         if verifier is None and self.s.verify_enabled and claude_available():
             verifier = Verifier(self.s.claude_model, self.s.claude_effort)
         self.verifier = verifier
         if self.verifier is None:
             log.warning("Vision LLM disabled (no Anthropic credentials or PINPOINT_VERIFY=0): "
-                        "module ID is skipped and plug checks rely on the serial test.")
+                        "module ID and questions are skipped; plug checks rely on the serial test.")
 
         self.engine = GuidanceEngine(
             self.project, self.layout, mode=self.s.mode, verifier_available=self.verifier is not None,
-            place_then_check=self.s.place_then_check, sonify=self.s.sonify,
-            hand_gone_check_s=self.s.hand_gone_check_s,
+            steering=self.live, sonify=self.s.sonify, hand_gone_check_s=self.s.hand_gone_check_s,
         )
         self.scheduler = SpeechScheduler(self.s.speech_min_interval_s, self.s.speech_repeat_after_s)
-        self.tts = TTSWorker(ROOT / "cache" / "tts", speak_locally=transport.local_audio)
+        self.tts = TTSWorker.shared(ROOT / "cache" / "tts", speak_locally=transport.local_audio)
         if not transport.local_audio:
             self.tts.prerender(common_phrases(list(self.layout.ports)))
         self.beeper = LocalBeeper() if transport.local_audio else None
@@ -64,10 +75,14 @@ class Session:
 
         self._pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="verify")
         self._results: queue.Queue = queue.Queue()
-        self._commands: queue.Queue[str] = queue.Queue()
+        self._commands: queue.Queue[tuple[str, str]] = queue.Queue()
         self._stop = threading.Event()
         self._remote_busy_until = 0.0
         self._last_serial_poll = 0.0
+        self._capture: tuple[AutoCapture, PhotoRequest] | None = None
+        self._last_frame_t = 0.0
+        self._last_card_t = 0.0
+        self._ended_logged = False
 
         self.latest_frame: np.ndarray | None = None
         self.latest_annotated: np.ndarray | None = None
@@ -82,7 +97,8 @@ class Session:
         self.transport.start()
         self.serial.start()
         self._handle(self.engine.start())
-        threading.Thread(target=self._loop, name="session", daemon=True).start()
+        self._thread = threading.Thread(target=self._loop, name="session", daemon=True)
+        self._thread.start()
         return self
 
     def stop(self) -> None:
@@ -90,25 +106,38 @@ class Session:
         self.serial.stop()
         self.transport.close()
         self._pool.shutdown(wait=False, cancel_futures=True)
+        thread = getattr(self, "_thread", None)
+        if thread is not None:
+            thread.join(timeout=2.0)
+        if hasattr(self.hands, "close") and (thread is None or not thread.is_alive()):
+            self.hands.close()
 
     def command(self, text: str) -> str | None:
-        """Thread-safe: queue a spoken/typed/button command."""
+        """Thread-safe: queue a spoken/typed/button command or a free-form question."""
         cmd = parse_command(text)
         if cmd:
-            self._commands.put(cmd)
-        return cmd
+            self._commands.put(("cmd", cmd))
+            return cmd
+        if is_question(text):
+            self._commands.put(("question", text.strip()))
+            return "question"
+        return None
 
     # ------------------------------------------------------------ main loop
     def _loop(self) -> None:
         last = time.monotonic()
         while not self._stop.is_set():
             for text in self.transport.poll_transcripts():
+                self.transcript_log.append(f"> {text}")
                 self.command(text)
             while not self._commands.empty():
-                self._handle(self.engine.on_command(self._commands.get_nowait()))
+                kind, val = self._commands.get_nowait()
+                self._handle(self.engine.on_command(val) if kind == "cmd" else self.engine.on_question(val))
             while not self._results.empty():
                 kind, res = self._results.get_nowait()
-                self._handle(self.engine.on_identify_result(res) if kind == "identify" else self.engine.on_plug_result(res))
+                handler = {"identify": self.engine.on_identify_result, "plug": self.engine.on_plug_result,
+                           "answer": self.engine.on_answer}[kind]
+                self._handle(handler(res))
 
             item = self.transport.read_frame()
             if item is not None:
@@ -121,6 +150,10 @@ class Session:
                 time.sleep(0.005)
 
             now = time.monotonic()
+            self._idle_video(now)
+            if getattr(self.transport, "call_ended", False) and not self._ended_logged:
+                self._ended_logged = True
+                log.info("Call ended")
             if now - self._last_serial_poll > 0.5:
                 self._last_serial_poll = now
                 self._handle(self.engine.on_serial_status(self.serial.status(now)))
@@ -128,7 +161,14 @@ class Session:
 
     def process_frame(self, frame: np.ndarray, now: float) -> None:
         self.latest_frame = frame
-        shield_ok = self.shield.update(frame, now)
+        if self.live:
+            shield_ok = self.shield.update(frame, now)
+        else:
+            # Hand-held phone: the view changes constantly, so never trust a cached board position.
+            self.shield.update(frame, now, force=True)
+            if len(set(self.shield.visible_ids) & set(self.layout.markers)) < 3:
+                self.shield.H_board_from_img = self.shield.H_img_from_board = None
+            shield_ok = self.shield.ready
         hands = self.hands.process(frame, now)
 
         hand = None
@@ -147,53 +187,110 @@ class Session:
         gesture = self.gestures.update(g.gesture if g else None, g.gesture_score if g else 0.0, now)
 
         self._handle(self.engine.on_observation(Observation(now, shield_ok, fp, gesture)))
+        if self._capture is not None:
+            self._feed_capture(frame, now)
 
         state = self.engine.view_state()
         self.latest_annotated = draw_guidance(frame, self.shield, state, self.fingertip_px, now)
-        if self.engine.mode == "visual":
+        # The agent's video is where captions live on FaceTime (Chert has no captions API).
+        self.transport.send_video_frame(self.latest_annotated)
+        self._last_frame_t = now
+
+    def _idle_video(self, now: float) -> None:
+        """No caller frames (phone face down / camera off): keep the caption visible anyway."""
+        if getattr(self.transport, "wants_video", False) and now - self._last_frame_t > 0.5 \
+                and now - self._last_card_t > 0.2:
+            self._last_card_t = now
+            self.latest_annotated = caption_card(self.engine.view_state())
             self.transport.send_video_frame(self.latest_annotated)
 
     # ------------------------------------------------------------ actions
     def _handle(self, actions) -> None:
         for a in actions:
             if isinstance(a, Say):
-                self.transcript_log.append(a.text)
-                if self.engine.mode != "visual":  # visual mode: captions only
-                    self.scheduler.submit(a, time.monotonic())
+                self._say(a)
             elif isinstance(a, Beep):
                 if self.engine.mode == "voice":
                     if self.beeper:
                         self.beeper.set(a.closeness)
                     else:
                         self.transport.send_beep(tone_wav(500 + 1000 * a.closeness))
-            elif isinstance(a, RequestIdentify):
-                self._pool.submit(self._identify_job, a)
-            elif isinstance(a, RequestPlugCheck):
-                self._pool.submit(self._plug_job, a)
+            elif isinstance(a, (RequestIdentify, RequestPlugCheck, RequestAnswer)):
+                self._request_photo(a)
             elif isinstance(a, Finished):
                 self._finish(a.recap)
         if self.beeper and self.engine.phase.value != "guide":
             self.beeper.set(None)
 
-    def _identify_job(self, req: RequestIdentify) -> None:
-        frame = self.latest_frame
-        if frame is None or self.verifier is None:
-            self._results.put(("identify", ModuleID("unknown", False, "no frame")))
-            return
-        self._results.put(("identify", self.verifier.identify_module(frame, req.candidates)))
+    def _say(self, a: Say) -> None:
+        self.transcript_log.append(a.text)
+        self.transport.send_caption(a.text)
+        if self.engine.mode != "visual":  # visual mode: captions only
+            self.scheduler.submit(a, time.monotonic())
 
-    def _plug_job(self, req: RequestPlugCheck) -> None:
-        time.sleep(0.7)  # let the hand clear the port
-        frame = self.latest_frame
-        if frame is None or self.verifier is None:
-            self._results.put(("plug", PlugCheck(None, None, "no verifier")))
+    # ------------------------------------------------------------ photo on demand
+    def _request_photo(self, req: PhotoRequest) -> None:
+        if self.live:
+            # Phone is on the stand: the current frame is the photo (wait a moment for the hand to clear).
+            delay = 0.7 if isinstance(req, RequestPlugCheck) else 0.0
+            self._pool.submit(self._job_after_delay, req, delay)
             return
-        annotated = draw_port_labels(frame, self.shield, highlight=req.ports)
-        ok, jpg = cv2.imencode(".jpg", annotated)
-        if ok:
-            self.snapshots.append(jpg.tobytes())
-        self._results.put(("plug", self.verifier.check_plug(annotated, req.module, req.ports)))
+        purpose = "plug" if isinstance(req, RequestPlugCheck) else "identify" if isinstance(req, RequestIdentify) else "question"
+        ports = req.ports if isinstance(req, RequestPlugCheck) else []
+        if self._capture is not None:  # a newer request replaces an unfinished one
+            self._fail(self._capture[1])
+        self._capture = (AutoCapture(purpose, ports, time.monotonic(), self.s.capture_timeout_s), req)
+        target = self.layout.ports[ports[0]].spoken if len(ports) == 1 else "the I 2 C ports" if ports else ""
+        self._say(Say(capture_prompt(purpose, target), "info"))
 
+    def _feed_capture(self, frame: np.ndarray, now: float) -> None:
+        cap, req = self._capture
+        upd = cap.feed(frame, now, self.shield)
+        if upd.status == "waiting":
+            if upd.hint:
+                self._say(Say(upd.hint, "steer", upd.hint_key))
+            return
+        self._capture = None
+        if upd.status == "timeout" or upd.frame is None:
+            self._say(Say("I didn't get a clear photo.", "info"))
+            self._fail(req)
+            return
+        self._say(Say("Got it. You can put the phone down.", "urgent", "photo_ok"))
+        self._pool.submit(self._run_job, req, upd.frame, upd.labeled)
+
+    def _fail(self, req: PhotoRequest) -> None:
+        if isinstance(req, RequestIdentify):
+            self._results.put(("identify", ModuleID("unknown", False, "no photo")))
+        elif isinstance(req, RequestPlugCheck):
+            self._results.put(("plug", PlugCheck(None, None, "no photo")))
+        else:
+            self._results.put(("answer", None))
+
+    def _job_after_delay(self, req: PhotoRequest, delay: float) -> None:
+        time.sleep(delay)
+        frame = self.latest_frame
+        if frame is None:
+            self._fail(req)
+            return
+        self._run_job(req, frame, self.shield.ready)
+
+    def _run_job(self, req: PhotoRequest, frame: np.ndarray, labeled: bool) -> None:
+        if self.verifier is None:
+            self._fail(req)
+            return
+        if isinstance(req, RequestIdentify):
+            self._results.put(("identify", self.verifier.identify_module(frame, req.candidates)))
+        elif isinstance(req, RequestPlugCheck):
+            photo = draw_port_labels(frame, self.shield, highlight=req.ports) if labeled else frame
+            ok, jpg = cv2.imencode(".jpg", photo)
+            if ok:
+                self.snapshots.append(jpg.tobytes())
+            self._results.put(("plug", self.verifier.check_plug(photo, req.module, req.ports, labeled=labeled)))
+        else:
+            self._results.put(("answer", self.verifier.answer_question(frame, req.question, req.context,
+                                                                      self.engine.mode)))
+
+    # ------------------------------------------------------------ output
     def _speak(self, now: float) -> None:
         busy = self.tts.busy if self.transport.local_audio else now < self._remote_busy_until
         say = self.scheduler.pop_ready(now, busy=busy)
@@ -221,7 +318,7 @@ class Session:
                 images.append(jpg.tobytes())
         for i, img in enumerate(images):
             (out_dir / f"step{i + 1}.jpg").write_bytes(img)
-        # Blind mode gets audio-friendly text only; visual mode also gets annotated screenshots.
+        # Blind mode gets audio-friendly text only; visual mode also gets the plug-check photos.
         self.transport.send_message(recap, images if self.engine.mode == "visual" else None)
         log.info("Recap saved to %s", out_dir)
 
@@ -230,6 +327,8 @@ class Session:
         st = self.serial.status()
         return {
             **self.engine.view_state(),
+            "guidance": "live" if self.live else "snapshot",
+            "capturing": self._capture[0].purpose if self._capture else None,
             "fps": round(self.fps, 1),
             "shield_ok": self.shield.ready,
             "markers": self.shield.visible_ids,

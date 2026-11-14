@@ -1,4 +1,5 @@
-"""Slow path: vision-LLM checks on a single frame (module ID, cable-in-port).
+"""
+Slow path: vision-LLM checks on a single frame (module ID, cable-in-port)
 
 These calls take seconds, so they run on a worker thread and never block the
 per-frame guidance loop. Each frame is annotated with port labels before it is
@@ -91,8 +92,12 @@ class Verifier:
         self.model = model
         self.effort = effort
 
-    def _ask(self, image_b64: str, prompt: str, schema: dict) -> dict | None:
+    def _ask(self, image_b64: str, prompt: str, schema: dict | None) -> dict | str | None:
+        """One image + prompt. Returns parsed JSON if `schema` is given, else plain text."""
         a = self._anthropic
+        output_config: dict = {"effort": self.effort}
+        if schema is not None:
+            output_config["format"] = {"type": "json_schema", "schema": schema}
         try:
             resp = self.client.beta.messages.create(
                 model=self.model,
@@ -100,7 +105,7 @@ class Verifier:
                 system=_SYSTEM,
                 betas=["server-side-fallback-2026-07-01"],
                 fallbacks="default",  # re-route on a safety-classifier refusal instead of failing the check
-                output_config={"effort": self.effort, "format": {"type": "json_schema", "schema": schema}},
+                output_config=output_config,
                 messages=[{
                     "role": "user",
                     "content": [
@@ -122,6 +127,8 @@ class Verifier:
             log.warning("Claude declined the verification request")
             return None
         text = "".join(b.text for b in resp.content if b.type == "text")
+        if schema is None:
+            return text.strip() or None
         try:
             return json.loads(text)
         except json.JSONDecodeError:
@@ -136,24 +143,52 @@ class Verifier:
             "Answer with exactly one candidate name, or 'unknown' if no module is clearly held."
         )
         out = self._ask(encode_jpeg(frame_bgr), prompt, _MODULE_SCHEMA)
-        if not out:
+        if not isinstance(out, dict):
             return ModuleID("unknown", False, "verification unavailable")
         name = out.get("module", "unknown")
         if name not in candidates:
             name = "unknown"
         return ModuleID(name, bool(out.get("confident")), out.get("description", ""))
 
-    def check_plug(self, annotated_bgr: np.ndarray, module: str, port: str | list[str]) -> PlugCheck:
+    def check_plug(self, frame_bgr: np.ndarray, module: str, port: str | list[str], labeled: bool = True) -> PlugCheck:
+        """`labeled`: port labels were drawn on the frame (corner markers were visible).
+        Close-up photos without markers rely on the shield's own printed labels instead."""
         ports = [port] if isinstance(port, str) else port
-        target = ports[0] if len(ports) == 1 else "any of " + ", ".join(ports)
+        target = ports[0] if len(ports) == 1 else "any of " + ", ".join(p.replace("_", " ") for p in ports)
+        how = ("Port labels have been drawn on the image in yellow; the expected port is circled in green. "
+               if labeled else
+               "This is a close-up of a Grove Base Shield; read the port names printed next to each socket "
+               "(D2-D8, A0-A3, I2C, UART). ")
         prompt = (
-            "Port labels have been drawn on the image in yellow; the expected port is circled in green. "
+            how +
             f"Is the Grove cable from the {module} fully plugged into {target}? "
-            "Report the label of the port that cable is actually in ('none' if it is not in any port)."
+            "Report the label of the port that cable is actually in ('none' if it is not in any port). "
+            "Write I2C ports as I2C_1..I2C_4 if labels are drawn, otherwise just I2C."
         )
-        out = self._ask(encode_jpeg(annotated_bgr, max_side=1280), prompt, _PLUG_SCHEMA)
-        if not out:
+        out = self._ask(encode_jpeg(frame_bgr, max_side=1280), prompt, _PLUG_SCHEMA)
+        if not isinstance(out, dict):
             return PlugCheck(None, None, "verification unavailable")
         plugged = {"yes": True, "no": False}.get(out.get("plugged", "unsure"))
-        seen = out.get("port_seen") or "none"
-        return PlugCheck(plugged, None if seen.lower() == "none" else seen, out.get("description", ""))
+        seen = (out.get("port_seen") or "none").strip()
+        if seen.lower() == "none":
+            seen = None
+        elif seen.upper().startswith("I2C"):
+            # Unlabelled close-ups can't tell the four I2C ports apart; any of them counts.
+            seen = next((p for p in ports if p.upper() == seen.upper()), None) or \
+                next((p for p in ports if p.startswith("I2C")), seen)
+        return PlugCheck(plugged, seen, out.get("description", ""))
+
+    def answer_question(self, frame_bgr: np.ndarray, question: str, context: str, mode: str) -> str | None:
+        """Free-form question from the builder, answered from one photo."""
+        audience = ("The answer will be read aloud to a blind builder: describe things by touch, shape and "
+                    "position (left/right/near/far), never by colour alone."
+                    if mode != "visual" else
+                    "The answer will be shown as a caption to a Deaf builder: keep it short and plain.")
+        prompt = (
+            f"Context: {context}\n{audience}\n"
+            f"The builder asks: \"{question}\"\n"
+            "Answer in at most two short sentences, based only on what the photo shows. "
+            "If the photo doesn't show enough to answer, say what to point the camera at instead."
+        )
+        out = self._ask(encode_jpeg(frame_bgr), prompt, None)
+        return out if isinstance(out, str) else None

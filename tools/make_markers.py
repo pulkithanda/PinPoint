@@ -1,4 +1,5 @@
-"""Generate markers/aruco_4x4.pdf: four 4x4_50 ArUco markers (ids 0-3) at true size on A4/Letter.
+"""
+Generate markers/aruco_4x4.pdf: four 4x4_50 ArUco markers (ids 0-3) at true size on A4/Letter
 
 Print at 100% scale ("actual size", NOT "fit to page"), cut out, and tape upright on the
 Base Shield corners: 0 = far-left, 1 = far-right, 2 = near-right, 3 = near-left.

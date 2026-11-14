@@ -1,4 +1,5 @@
-"""Electrical check: read `dist=34 lcd=1` lines from the Arduino over USB serial.
+"""
+Electrical check: read `dist=34 lcd=1` lines from the Arduino over USB serial.
 
 Real readings that change when a hand moves prove the build works; silent or
 stuck values point to a likely wrong port.
