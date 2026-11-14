@@ -1,0 +1,48 @@
+id: proximity_alert
+title: Proximity alert
+summary: >-
+  Beeps faster as something gets closer, and the screen shows the distance,
+  glowing green, yellow, then flashing red.
+
+# Every module the builder might pick up (the vision LLM picks one of these).
+modules:
+  - Ultrasonic Distance Sensor
+  - Buzzer
+  - LCD RGB Backlight
+
+# Must match arduino/proximity_alert/proximity_alert.ino.
+steps:
+  - id: sensor
+    module: Ultrasonic Distance Sensor
+    spoken_module: the distance sensor
+    targets: [D7]
+    find: Pick up the distance sensor. It's the one with two round silver eyes. Hold it up to the camera.
+    say: Plug the distance sensor's cable into D7.
+    show: "Distance sensor -> D7"
+    tip: The plug only fits one way. Turn it until it slides in, then push until it clicks.
+
+  - id: buzzer
+    module: Buzzer
+    spoken_module: the buzzer
+    targets: [D6]
+    find: Pick up the buzzer. It's the small board with one round black cylinder on it. Hold it up to the camera.
+    say: Plug the buzzer's cable into D6.
+    show: "Buzzer -> D6"
+    tip: D6 is right next to D7, so feel for the cable you just plugged in.
+
+  - id: lcd
+    module: LCD RGB Backlight
+    spoken_module: the screen
+    targets: [I2C_1, I2C_2, I2C_3, I2C_4]
+    find: Pick up the screen. It's the biggest module, with a flat glass window. Hold it up to the camera.
+    say: Plug the screen's cable into any I 2 C port.
+    show: "LCD screen -> any I2C port"
+    tip: The I 2 C ports are along the edge nearest you. Any of them works.
+
+final_check:
+  type: serial
+  say: Now plug the USB cable into the Arduino, so I can check it works.
+  show: "Plug in USB to test"
+  sensor_port: D7
+  lcd_port: an I 2 C port
+  success: I'm getting readings from your sensor. It works! Move your hand toward it and listen to the beeps speed up.
