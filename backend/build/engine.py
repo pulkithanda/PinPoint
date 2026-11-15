@@ -108,7 +108,7 @@ NO = {"no", "nope", "something else", "never mind", "nevermind", "cancel", "diff
 _READY = ("ready", "next", "done", "got it", "okay", "ok", "continue", "it's in", "finished", "in", "yes", "plugged in",
           "all set", "set up", "did it", "did that", "done it", "it's done", "that's done", "already", "i'm ready",
           "im ready", "it's there", "yep", "yeah")
-_READY_ANYWHERE = ("already", "all set", "i did that", "it's already", "its already", "i've done", "ive done")
+_READY_ANYWHERE = ("go ahead", "let's continue", "lets continue", "keep going", "let's keep going", "already", "all set", "i did that", "it's already", "its already", "i've done", "ive done")
 
 
 def _norm(text: str) -> str:
@@ -1071,7 +1071,7 @@ class BuildEngine:
             return None          # "which one of these is the LED?": telling parts apart, not where it goes
         if any(w in padded for w in (" where ", " which ", " what pin", " what hole", " what row", " other end",
                                      " what next", " what's next", " whats next", " what do i do", " how do i ",
-                                     " what now", " go ")):
+                                     " what now", " does it go", " do they go", " does this go")):
             if s is not None:
                 return self._where(s)
             if any(w in padded for w in (" usb", " cable", " laptop")) and " pin" not in padded:
