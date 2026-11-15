@@ -9,7 +9,7 @@ import pytest
 from backend.build import library
 from backend.build.board import BuildPlan, Orientation, endpoint_text, load_kit, pin_text, validate
 from backend.build.engine import (BuildEngine, Finished, Phase, RequestPartID, RequestPlacementCheck, RequestPlan,
-                                  RequestReview, RequestSetupCheck, RequestUpload)
+                                  RequestReply, RequestReview, RequestSetupCheck, RequestUpload)
 from backend.build.planner import OfflinePlanner, Planner
 from backend.guidance.engine import RequestAnswer, Say
 from backend.hardware.uploader import UploadResult
@@ -44,6 +44,10 @@ def test_library_has_basics_and_ten_advanced():
 def test_library_matching(request_text, expected):
     got = library.match(request_text)
     assert (got.id if got else None) == expected
+
+
+def test_short_demo_request_skips_planner():
+    assert library.confident_match("a blinking light").id == "blink_led"
 
 
 def _first(errs, needle):
@@ -110,14 +114,13 @@ def test_checker_rejects_unknown_parts_and_stock():
 # ------------------------------------------------------------------ touch directions
 def test_touch_directions():
     o = Orientation()
-    assert endpoint_text("E10", KIT, o) == "row 10, counting 10 from the left end, the hole right beside the groove, on your side"
-    assert endpoint_text("A3", KIT, o).endswith("the outermost hole on your side")
-    assert "second hole from the groove, on the far side" in endpoint_text("G3", KIT, o)
+    assert endpoint_text("E10", KIT, o) == "row 10 from the left end, hole beside groove, on your side"
+    assert endpoint_text("A3", KIT, o).endswith("outermost hole on your side")
+    assert "second hole from groove, on the far side" in endpoint_text("G3", KIT, o)
     assert "minus rail" in endpoint_text("RAIL:N-", KIT, o) and "outer strip" in endpoint_text("RAIL:N-", KIT, o)
     assert "inner strip" in endpoint_text("RAIL:N+", KIT, o)
-    assert pin_text("UNO:D13", KIT) == ("pin D13 on the Arduino: the socket strip along the far edge, left-hand "
-                                        "block, fifth socket from the left")
-    assert "near edge, right-hand block, first socket" in pin_text("UNO:A0", KIT)
+    assert pin_text("UNO:D13", KIT) == "Arduino D13: far socket strip, left-hand block, fifth from left"
+    assert "near socket strip, right-hand block, first from left" in pin_text("UNO:A0", KIT)
     o.row1 = "right"
     assert "from the right end" in endpoint_text("E10", KIT, o)
 
@@ -188,7 +191,7 @@ def test_full_build_with_a_caught_mistake():
     clock = Clock()
     eng = BuildEngine(KIT, mode="voice", clock=clock)
     out = eng.start()
-    assert "What would you like to build" in _says(out)
+    assert "What are we building" in _says(out) and "quick demo" in _says(out)
     assert eng.on_utterance("ok") and eng.phase == Phase.INTAKE       # a stray "ok" isn't a request
 
     out = eng.on_utterance("I want a light that turns on in the dark")
@@ -197,8 +200,9 @@ def test_full_build_with_a_caught_mistake():
     clock.t += 16
     assert "Still working on it" in _says(eng.on_tick())
     out = eng.on_plan_result(OfflinePlanner().plan(req.request))
-    assert eng.phase == Phase.CONFIRM and "Want to build it" in _says(out)
+    assert eng.phase == Phase.CONFIRM and "Say yes" in _says(out)
     assert "light sensor" in _says(out)
+
 
     out = eng.on_utterance("yes let's do it")
     assert eng.phase == Phase.SETUP
@@ -240,6 +244,32 @@ def test_full_build_with_a_caught_mistake():
     assert eng.phase == Phase.DONE
     assert "Automatic night light" in fin.recap and "Caught along the way" in fin.recap
     assert "a light that turns on in the dark" in fin.recap
+
+
+def test_wire_instruction_is_short_but_keeps_both_destinations():
+    eng = _engine_at_confirm()
+    eng.on_utterance("yes")
+    eng.on_utterance("skip")
+    instruction = _says(eng._enter_step())
+    assert "one end to" in instruction and "the other to" in instruction
+    assert "Say done" in instruction and len(instruction.split()) < 40
+
+
+def test_slow_photo_check_gets_progress_prompt():
+    clock = Clock()
+    eng = BuildEngine(KIT, clock=clock)
+    eng._enter(Phase.CHECKING)
+    eng._pending = True
+    clock.t = 8.0
+    assert "still checking the photo" in _says(eng.on_tick())
+    assert eng.on_tick() == []
+
+
+def test_planner_defaults_to_low_effort(monkeypatch):
+    from backend.config import Settings
+
+    monkeypatch.delenv("PINPOINT_PLANNER_EFFORT", raising=False)
+    assert Settings().planner_effort == "low"
 
 
 def test_change_request_and_questions():
@@ -326,6 +356,52 @@ def test_build_session_smoke(tmp_path, monkeypatch):
         sess.stop()
 
 
+def test_continuous_mode_checks_a_placement_automatically(tmp_path, monkeypatch):
+    from backend import build_session as bs
+    from backend.build_session import BuildSession
+    from backend.config import Settings
+    from backend.hardware.serial_monitor import FakeSerialMonitor
+
+    monkeypatch.setattr(bs, "RESUME_FILE", tmp_path / "resume.json")
+
+    class Transport:
+        local_audio = False
+        wants_video = False
+
+        def start(self): pass
+        def send_caption(self, text): pass
+        def send_speech(self, text, wav): pass
+        def send_message(self, text, images=None): pass
+        def close(self): pass
+
+    class NoUploader:
+        available = False
+
+    session = BuildSession(Transport(), Settings(), planner=OfflinePlanner(), verifier=None,
+                           uploader=NoUploader(), serial=FakeSerialMonitor(), hand_tracker=None)
+    try:
+        engine = _engine_at_confirm()
+        engine.on_utterance("yes")
+        engine.on_utterance("skip")
+        while engine.phase == Phase.FIND:
+            engine.on_utterance("ready")
+        assert engine.phase == Phase.PLACE
+        engine.verifier_available = True
+        engine.check_wires = True
+        session.engine = engine
+        session.verifier = object()
+        session._set_continuous_monitoring(True)
+
+        session._continuous_monitor_tick(10.0)
+        assert engine.phase == Phase.PLACE
+        session._continuous_monitor_tick(15.0)
+        assert engine.phase == Phase.CHECKING and engine._pending
+        assert session._capture is not None
+    finally:
+        session._pool.shutdown(wait=False, cancel_futures=True)
+        session._speech_pool.shutdown(wait=False, cancel_futures=True)
+
+
 # ------------------------------------------------------------------ listening (from the first real call)
 def _engine_at_confirm():
     eng = BuildEngine(KIT, clock=Clock())
@@ -356,7 +432,7 @@ def test_misheard_fragments_dont_replan(said):
     eng = _engine_at_confirm()
     out = eng.on_utterance(said)
     assert eng.phase == Phase.CONFIRM and not any(isinstance(a, RequestPlan) for a in out)
-    assert "I heard" in _says(out)
+    assert "didn't quite catch" in _says(out) and said not in _says(out)      # asks again, never parrots
 
 
 def test_yes_but_change_replans():
@@ -401,7 +477,9 @@ def test_unrecognised_comment_mid_build_is_acknowledged():
     eng.on_utterance("yes")
     eng.on_utterance("skip")                     # skip the setup photo
     out = eng.on_utterance("this wire feels really short")
-    assert "I heard" in _says(out)
+    reply = next(a for a in out if isinstance(a, RequestReply))               # a real answer, not a parrot
+    assert reply.text == "this wire feels really short" and "Touch directions for the current step" in reply.context
+    assert "I heard" not in _says(out)
 
 
 def test_setup_photo_feedback():
@@ -420,11 +498,28 @@ def test_setup_photo_feedback():
     assert eng.phase in (Phase.FIND, Phase.PLACE)            # third try: go with the standard layout
 
 
+def test_setup_uncertainty_and_manual_confirmation_avoid_repeat_photos():
+    eng = _engine_at_confirm()
+    eng.on_utterance("yes")
+    out = eng.on_setup_result(BoardSetup(None, None, None, None, "unclear direction", board_visible=True))
+    assert "can't reliably judge" in _says(out)
+    assert eng.phase in (Phase.FIND, Phase.PLACE)
+
+    eng = _engine_at_confirm()
+    eng.on_utterance("yes")
+    out = eng.on_setup_result(BoardSetup(None, None, None, False, "possibly rotated", board_visible=True,
+                                         fix="Turn the Arduino so USB points left."))
+    assert "say 'continue'" in _says(out)
+    out = eng.on_utterance("continue")
+    assert "trust your setup" in _says(out)
+    assert eng.phase in (Phase.FIND, Phase.PLACE)
+
+
 def test_setup_already_right_starts_in_one_photo():
     eng = _engine_at_confirm()
     eng.on_utterance("yes")
     out = eng.on_setup_result(BoardSetup("AE", "left", "-", True, "layout ok", board_visible=True, long_side_toward=True))
-    assert "already set up just right" in _says(out) and "Step 1 of" in _says(out)
+    assert "Setup looks good" in _says(out) and "Step 1 of" in _says(out)
     assert eng.phase in (Phase.FIND, Phase.PLACE)
 
 
@@ -462,7 +557,7 @@ def test_segmenter_flags_speech_start_once_per_utterance():
     loud = (np.sin(np.arange(1600) / 3.0) * 8000).astype(np.int16)    # 0.1 s of speech-level audio
     quiet = np.zeros(1600, np.int16)
     starts = 0
-    for chunk in [loud] * 6 + [quiet] * 8 + [loud] * 6:
+    for chunk in [loud] * 9 + [quiet] * 8 + [loud] * 9:
         seg.feed(chunk, 16000)
         if seg.speech_started:
             seg.speech_started = False
@@ -490,8 +585,8 @@ def test_where_and_how_questions_are_answered_from_the_plan():
     eng.on_utterance("skip")                      # standard layout, step 1: 5V -> plus rail
     out = eng.on_utterance("Okay so I inserted one end onto the positive rail. Where does the other end go?")
     assert not any(isinstance(a, RequestAnswer) for a in out)
-    assert "pin GND" in _says(out) and "minus rail" in _says(out)      # blink_led starts with GND -> minus rail
-    assert "near edge" in _says(out)                                   # the GND socket beside the breadboard
+    assert "Arduino GND" in _says(out) and "minus rail" in _says(out)  # blink_led starts with GND -> minus rail
+    assert "near socket strip" in _says(out)                           # the GND socket beside the breadboard
     out = eng.on_utterance("How do I put a jumper wire onto the breadboard?")
     assert not any(isinstance(a, RequestAnswer) for a in out) and "metal pin" in _says(out)
     out = eng.on_utterance("Are you able to see it now?")
@@ -601,3 +696,218 @@ def test_waiting_room_sessions_never_touch_the_saved_build(tmp_path, monkeypatch
     finally:
         caller.stop()            # hung up during the question: the offer is kept
     assert bs.load_resume(1800) is not None
+
+
+
+def test_wire_question_after_the_steps_gets_a_real_answer():
+    """From the call: "Where do I put this yellow wire?" at the plug-in-USB stage was parroted back."""
+    eng = _engine_mid_build()
+    eng.step_idx = len(eng.plan.steps)
+    eng._enter_upload()
+    out = eng.on_utterance("The Arduino is on. Where do I put this yellow wire?")
+    reply = next(a for a in out if isinstance(a, RequestReply))
+    assert "UNO:D13" in reply.context and "D10" in reply.context            # Claude gets the full wiring
+    assert "I heard" not in _says(out)
+    out = eng.on_utterance("where does the USB cable go?")
+    assert "square end" in _says(out)                                       # instant, from the plan
+    out = eng.on_utterance("I don't have the LED in yet, can I go back")
+    assert eng.phase in (Phase.FIND, Phase.PLACE) or any(isinstance(a, RequestReply) for a in out)
+    out = eng.on_utterance("back")
+    assert eng.phase in (Phase.FIND, Phase.PLACE) and "back to the wiring" in _says(out).lower()
+
+
+
+def test_look_requests_take_a_photo_even_without_a_question_mark():
+    eng = _engine_mid_build()
+    for said in ("Take a look at the circuit and tell me what you think.", "check my wiring please"):
+        out = eng.on_utterance(said)
+        assert any(isinstance(a, RequestAnswer) for a in out), said
+
+
+def test_failed_upload_never_claims_it_works():
+    eng = _engine_mid_build()
+    eng.step_idx = len(eng.plan.steps)
+    eng._enter_upload()
+    for _ in range(4):
+        eng.on_utterance("ready")
+        out = eng.on_upload_result(UploadResult(False, "board", "Arduino UNO Q",
+                                                "The board plugged in is an Arduino UNO Q, not the kit's UNO R3."))
+        assert "Moment of truth" not in _says(out) and "blinking" not in _says(out)
+    said = ""
+    for _ in range(3):
+        eng.on_utterance("ready")
+        said += _says(eng.on_upload_result(UploadResult(False, "upload", "", "I couldn't send the code.")))
+    assert "isn't programmed" in said and "Moment of truth" not in said
+
+
+def test_pin_questions_are_not_mistaken_for_usb_questions():
+    eng = _engine_mid_build()
+    eng.step_idx = len(eng.plan.steps)
+    eng._enter_upload()
+    out = eng.on_utterance("What pins do I plug into on the Arduino?")
+    assert "USB cable" not in _says(out) and any(isinstance(a, RequestReply) for a in out)
+
+
+def test_only_the_latest_photo_answer_is_spoken_and_answers_are_short():
+    """From the call: "look at my wiring" x3 queued three long photo answers (~45 s of talking)."""
+    from backend.build.engine import brief
+
+    eng = _engine_mid_build()
+    seqs = []
+    for _ in range(3):
+        eng.on_utterance("Look at my wiring.")
+        seqs.append(eng.utter_seq)
+    long = ("I can see one jumper wire running from the right edge of the breadboard down to the header on the "
+            "left side of the Arduino, plus a small looped part near the top-left of the breadboard. But from "
+            "this distance I can't tell which holes they're in. Please move the camera closer to the board.")
+    assert eng.on_answer(long, seqs[0]) == [] and eng.on_answer(long, seqs[1]) == []   # stale: dropped
+    out = eng.on_answer(long, seqs[2])
+    assert len(out) == 1 and len(out[0].text.split()) <= 41 and out[0].text.count(".") <= 2
+    assert brief("One. Two. Three.") == "One. Two."
+
+
+def test_speaking_again_hushes_queued_speech(tmp_path, monkeypatch):
+    from backend import build_session as bs
+    from backend.config import Settings
+    from backend.hardware.serial_monitor import FakeSerialMonitor
+
+    monkeypatch.setattr(bs, "RESUME_FILE", tmp_path / "resume.json")
+
+    class T:
+        local_audio, wants_video = False, False
+        def __init__(self): self.stops, self.inbox = 0, []
+        def start(self): pass
+        def read_frame(self): return None
+        def poll_transcripts(self):
+            out, self.inbox = self.inbox, []
+            return out
+        def stop_speech(self): self.stops += 1
+        def send_speech(self, text, wav): pass
+        def send_caption(self, text): pass
+        def send_video_frame(self, frame): pass
+        def send_message(self, text, images=None): pass
+        def close(self): pass
+
+    class NoUploader:
+        available = False
+
+    t = T()
+    sess = bs.BuildSession(t, Settings(), planner=OfflinePlanner(), verifier=None, uploader=NoUploader(),
+                           serial=FakeSerialMonitor(), hand_tracker=None)
+    for i in range(3):
+        sess.scheduler.submit(Say(f"old line {i}"), 0.0)
+    t.inbox = ["a blinking light"]
+    sess._step([time.monotonic()])
+    assert t.stops >= 1
+    assert not any(s.text.startswith("old line") for s in sess.scheduler.queue)
+    sess.stop()
+
+
+
+def test_background_chatter_with_see_or_right_doesnt_trigger_a_photo():
+    eng = _engine_mid_build()
+    out = eng.on_utterance("You did not see the thing, but at that time. Well, it was talking, right? Okay, yeah. "
+                           "And then we show the finished circuit.")
+    assert not any(isinstance(a, RequestAnswer) for a in out)
+    assert any(isinstance(a, RequestAnswer) for a in eng.on_utterance("is this right?"))
+
+
+# ------------------------------------------------------------------ the fan: power module only, no Arduino
+def test_fan_is_the_first_suggestion_and_needs_no_llm():
+    eng = BuildEngine(KIT, clock=Clock())
+    assert "a fan" in _says(eng.start())
+    assert library.load_library()[0].plan.id == "fan"
+    client = FakeClient([])
+    assert Planner(client=client).plan("a fan").plan.id == "fan" and client.requests == []
+
+
+def test_fan_build_end_to_end():
+    eng = BuildEngine(KIT, clock=Clock())
+    eng.start()
+    eng.on_utterance("a fan")
+    eng.on_plan_result(OfflinePlanner().plan("a fan"))
+    out = eng.on_utterance("yes")
+    assert not any(isinstance(a, RequestSetupCheck) for a in out)           # no Arduino to photograph
+    assert "doesn't need the Arduino" in _says(out) and "Step 1 of 2" in _says(out)
+    eng.on_utterance("ready")                                                # found the power module
+    out = eng.on_utterance("done") if eng.phase == Phase.PLACE else []
+    for a in out:
+        if isinstance(a, RequestPlacementCheck):
+            out = eng.on_placement_result(PlacementCheck(True, "", "ok"))
+    assert eng.step_idx == 1
+    eng.on_utterance("ready")                                                # found the motor
+    out = eng.on_utterance("done")
+    for a in out:
+        if isinstance(a, RequestPlacementCheck):
+            out = eng.on_placement_result(PlacementCheck(True, "", "ok"))
+    assert eng.phase == Phase.TEST and "Can you feel the fan spinning" in _says(out)
+    assert not any(isinstance(a, (RequestReview, RequestUpload)) for a in out)   # no photo review, no upload
+    out = eng.on_utterance("no it's not")
+    assert "green light" in _says(out) and eng.phase == Phase.TEST
+    out = eng.on_utterance("yes it's spinning!")
+    assert any(isinstance(a, Finished) for a in out) and "It works" in _says(out)
+
+
+def test_power_module_short_is_caught():
+    p = plan("fan")
+    p.steps[1].connections[1].to = "RAIL:N+"           # motor black into plus: fine electrically? no: same rail
+    errs = validate(p, KIT)
+    assert errs                                          # both motor leads in one strip shorts it out
+    p = plan("fan")
+    p.steps[0].connections[1].to = "RAIL:N+"           # module minus into the plus rail
+    assert any("SHORT" in e or "same connected strip" in e or "already" in e for e in validate(p, KIT))
+
+
+def test_power_module_mount_instruction():
+    eng = BuildEngine(KIT, clock=Clock())
+    eng.start(); eng.on_utterance("a fan"); eng.on_plan_result(OfflinePlanner().plan("a fan"))
+    eng.on_utterance("yes")
+    out = eng.on_utterance("ready")
+    assert "right-hand end of the breadboard" in _says(out) and "5 volts" in _says(out)
+
+
+def test_unclear_photo_retakes_then_checks_by_touch():
+    eng = _engine_at_confirm()
+    eng.on_utterance("yes")
+    eng.on_utterance("skip")
+    eng.on_utterance("done")                              # step 1 (wire) -> step 2: find the LED
+    eng.on_utterance("ready")                             # found it -> place
+    out = eng.on_utterance("done")
+    assert any(isinstance(a, RequestPlacementCheck) for a in out)
+    out = eng.on_placement_result(PlacementCheck(None, "", "blurry"))
+    assert any(isinstance(a, RequestPlacementCheck) for a in out) and "a hand's width above row" in _says(out)
+    step = eng.step_idx
+    out = eng.on_placement_result(PlacementCheck(None, "", "still blurry"))
+    assert "check by touch" in _says(out) and eng.step_idx == step      # doesn't skip ahead
+    out = eng.on_utterance("no")
+    assert "let's fix it" in _says(out) and eng.phase == Phase.PLACE and eng.step_idx == step
+    eng.on_utterance("done")
+    eng.on_placement_result(PlacementCheck(None, "", "blurry"))
+    eng.on_placement_result(PlacementCheck(None, "", "blurry"))
+    out = eng.on_utterance("yes")
+    assert eng.step_idx == step + 1                                     # confirmed by touch: move on
+
+
+def test_unclear_final_check_asks_instead_of_trusting():
+    eng = _engine_mid_build()
+    eng.step_idx = len(eng.plan.steps)
+    out = eng._enter_review()
+    for _ in range(3):
+        out = eng.on_review_result(BoardReview(None, [], "dark"))
+    assert "check it by touch" in _says(out) and "trust your wiring" not in _says(out)
+    assert eng.phase == Phase.REVIEW
+    out = eng.on_utterance("yes")
+    assert eng.phase == Phase.UPLOAD
+
+
+def test_fan_done_asks_whether_it_works():
+    eng = BuildEngine(KIT, clock=Clock())
+    eng.start(); eng.on_utterance("a fan"); eng.on_plan_result(OfflinePlanner().plan("a fan"))
+    eng.on_utterance("yes")
+    eng.step_idx = len(eng.plan.steps)
+    eng._enter_review()
+    assert eng.phase == Phase.TEST
+    out = eng.on_utterance("done")
+    assert not any(isinstance(a, Finished) for a in out) and "Is it working" in _says(out)
+    out = eng.on_utterance("it works")
+    assert any(isinstance(a, Finished) for a in out) and "It works" in _says(out)

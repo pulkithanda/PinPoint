@@ -1,10 +1,11 @@
-# Pinpoint
+# PinPoint
 
 A FaceTime call that guides your hands, so blind and Deaf makers can build electronics with a standard starter kit (Arduino + Grove Base Shield). Our EmoryHacks 2026 project.
 
 ## How a build goes
 
-You FaceTime Pinpoint and keep the call open the whole time. The phone doesn't need a stand.
+You FaceTime PinPoint and keep the call open the whole time. Snapshot mode is the default, so the phone does not
+need a stand.
 
 1. **Pinpoint tells you what to pick up and where it goes, by touch.** For example: "Plug the distance sensor into D7. It's in the third row back from the edge nearest you, the second port from the left."
 2. **When it needs to see something, it asks you to hold up the phone.** For example: "Pick up the phone and hold it about a hand's width above D7."
@@ -12,14 +13,29 @@ You FaceTime Pinpoint and keep the call open the whole time. The phone doesn't n
    - If it can see the board's corner markers, it tells you how to aim: "Move the phone a little to your left."
    - Then it says "Got it. You can put the phone down."
 3. **Claude checks the photo.** It confirms the right module, or that the cable is in the right port. If you used the wrong port, Pinpoint says something like "That looks like D8, not D6."
-4. **You can ask questions at any time**, by voice or iMessage. For example, "is this plugged in the right way round?" Pinpoint asks for a photo and answers.
+4. **You can ask questions at any time**, by voice or iMessage. For example, "is this plugged in the right way round?" In snapshot mode PinPoint asks for a photo and answers.
 5. **After the last plug, you connect the USB cable.** Pinpoint reads the Arduino's sensor values and says "It works!" Then a recap arrives by iMessage.
 
 There are two output modes:
 - **Voice mode** (blind and low-vision): spoken directions.
-- **Visual mode** (Deaf and hard of hearing): big captions burned into Pinpoint's FaceTime video, with the target port highlighted. Thumbs-up means next, an open palm means repeat.
+- **Visual mode** (Deaf and hard of hearing): big captions burned into PinPoint's FaceTime video. Thumbs-up means next, an open palm means repeat.
 
-`PINPOINT_GUIDANCE=live` switches to the original design: the phone sits on an overhead stand, and Pinpoint steers your fingertip in real time ("right two ports… stop, that's D7").
+Elegoo Visual mode uses the existing ArUco tracker for hole overlays. Place marker IDs 0/1/2/3 around the Arduino
+as far-left/far-right/near-right/near-left, then center the Arduino beyond the breadboard with their long edges
+parallel and touching. Keep the printed side of each marker readable from the builder's seat. With at least three
+markers visible, PinPoint circles planned breadboard holes and points an arrow from the builder's fingertip toward
+the nearest target. The mapping assumes the nominal 70 x 56 mm marker frame and a standard 830-point breadboard;
+verify the circles against the physical board before relying on them. If markers are out of view, captions remain
+available without hole overlays. The Grove flow has separate marker-based port overlays.
+
+For a blind builder, text **"start continuous monitoring"** to the Chert line during an active Elegoo call. PinPoint
+switches to continuous video checks and automatically checks each placement instead of asking for a photo. Keep the
+phone camera pointed steadily at the circuit; a fixed position is needed for this mode. Text **"stop continuous
+monitoring"** to return to snapshot mode. If no output mode was chosen yet, continuous monitoring selects voice
+guidance. Voice-note transcription must arrive through Chert as a text message.
+
+`PINPOINT_GUIDANCE=live` remains the original Grove Base Shield flow: the phone sits on an overhead stand, and
+PinPoint steers your fingertip in real time ("right two ports… stop, that's D7").
 
 ## Code map
 
@@ -124,7 +140,7 @@ ngrok http 8000                            # or: cloudflared tunnel --url http:/
 - **FaceTime:** in the Chert dashboard, go to Workers & Lines → Integration. Set the HTTPS webhook to `https://<tunnel>/chert/webhook` and assign it to your line, with `customer_decides` and no default Assistant.
 - **iMessage:** run `python -m tools.chert_setup subscribe-imessage https://<tunnel>/chert/imessage/webhook`. Put the printed secret in `.env` as `CHERT_MESSAGING_WEBHOOK_SECRET`, then restart the backend.
 
-**6. Call.** FaceTime your Chert line, then open http://localhost:8000 to watch what Pinpoint sees. Say "voice mode" (or show a thumbs-up for visual mode), then follow the instructions. Commands: `ready`, `done`, `repeat`, `help`, `back`, `skip`, `what am I holding`, or any question, spoken or texted to the line.
+**6. Call.** FaceTime your Chert line, then open http://localhost:8000 to watch what PinPoint sees. Say "voice mode" (or show a thumbs-up for visual mode), then follow the instructions. Commands: `ready`, `done`, `repeat`, `help`, `back`, `skip`, `what am I holding`, or any question, spoken or texted to the line. To enable or disable continuous camera checks on an Elegoo call, send `start continuous monitoring` or `stop continuous monitoring` by iMessage.
 
 **Testing without Chert:**
 - `python -m tools.fake_bridge --say "voice mode" --say "ready"` plays Chert's part against a local `livekit-server --dev`. Set `LIVEKIT_URL=ws://127.0.0.1:7880`, `LIVEKIT_API_KEY=devkey` and `LIVEKIT_API_SECRET=secret`.

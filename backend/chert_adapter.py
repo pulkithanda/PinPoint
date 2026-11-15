@@ -122,6 +122,26 @@ def parse_inbound_message(event: dict) -> tuple[str | None, str]:
     return sender, text
 
 
+def continuous_monitoring_command(text: str) -> bool | None:
+    """Recognize explicit iMessage requests to start or stop continuous camera checks."""
+    normalized = re.sub(r"[^a-z0-9 ]", " ", text.lower().replace("don't", "dont"))
+    words = " ".join(normalized.split())
+    if "continuous" not in words or not any(w in words for w in ("monitor", "monitoring", "video")):
+        return None
+    if re.search(
+        r"\b(?:do not|dont|never)\s+(?:start|enable|activate|begin|turn on|switch to|stop|disable|turn off|switch off)\b",
+        words,
+    ):
+        return None
+    if any(w in words for w in ("stop", "disable", "turn off", "switch off")):
+        return False
+    if any(w in words for w in ("start", "enable", "activate", "begin", "turn on", "switch to")):
+        return True
+    if words in {"continuous monitoring", "continuous video monitoring", "continuous video", "monitor continuously"}:
+        return True
+    return None
+
+
 class Messaging:
     """Sends iMessages (recap + photos) on a background thread so the call never waits."""
 

@@ -222,7 +222,7 @@ class LiveKitTransport(CallTransport):
             self._stt = Transcriber(self.transcripts.put, self.stt_model, on_speech_start=self._on_speech_start)
         stream = self._rtc.AudioStream(track, sample_rate=16000, num_channels=1)
         async for ev in stream:
-            self._stt.feed_pcm(np.frombuffer(ev.frame.data, np.int16), 16000)
+            self._stt.feed_pcm(np.frombuffer(ev.frame.data, np.int16), 16000, agent_speaking=self.speaking)
 
     def read_frame(self):
         with self._lock:

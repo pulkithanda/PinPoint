@@ -13,25 +13,28 @@ import queue
 import re
 import threading
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 import cv2
 import numpy as np
 
-from backend.build.board import BuildPlan, load_kit
+from backend.build.board import BuildPlan, load_kit, parse_hole
 from backend.build.engine import (BuildEngine, Finished, Phase, RequestPartID, RequestPlacementCheck, RequestPlan,
-                                  RequestReview, RequestSetupCheck, RequestUpload)
+                                  RequestReply, RequestReview, RequestSetupCheck, RequestUpload)
 from backend.build.planner import OfflinePlanner, Planner, PlanResult
+from backend.build.visual_guidance import draw_breadboard_targets
 from backend.config import ROOT, Settings
 from backend.guidance.engine import RequestAnswer, Say
-from backend.guidance.overlay import _ascii, _caption_bar, caption_card
+from backend.guidance.overlay import _ascii, _caption_bar, _label, caption_card
 from backend.guidance.speech import SpeechScheduler, TTSWorker
 from backend.hardware.serial_monitor import SerialMonitor
 from backend.hardware.uploader import Uploader, UploadResult, first_error
 from backend.transport import CallTransport
 from backend.vision.capture import AutoCapture
 from backend.vision.hands import GestureDebouncer, HandTracker
+from backend.vision.shield import ShieldLayout, ShieldTracker
 from backend.vision.verify import BoardReview, BoardSetup, ModuleID, PlacementCheck, Verifier, claude_available
 
 log = logging.getLogger(__name__)
@@ -51,6 +54,34 @@ _PROMPTS = {
 
 
 RESUME_FILE = ROOT / "cache" / "resume.json"
+
+
+def _words(text: str) -> list[str]:
+    return re.findall(r"[a-z']+", text.lower())
+
+
+def is_echo(heard: str, recently_said: list[str]) -> bool:
+    """Did the caller's microphone just pick up Pinpoint's own voice? True when (nearly) every word heard
+    appears, in order, in something Pinpoint said moments ago. ("Ask me a question." after Pinpoint said
+    "... ask me a question, or say help.")"""
+    h = _words(heard)
+    if not h:
+        return False
+    for said in recently_said:
+        w = _words(said)
+        if len(h) > len(w) + 1:
+            continue
+        # longest run of heard words found in order inside what was said
+        i = hits = 0
+        for word in h:
+            j = i
+            while j < len(w) and w[j] != word:
+                j += 1
+            if j < len(w):
+                hits, i = hits + 1, j + 1
+        if len(h) >= 2 and hits >= len(h) - (1 if len(h) >= 4 else 0):   # one word is never judged echo
+            return True
+    return False
 
 
 def split_sentences(text: str, min_len: int = 40) -> list[str]:
@@ -101,10 +132,10 @@ def fixed_phrases(mode: str = "") -> list[str]:
     lines += [
         "Ooh, nice idea. Give me a moment to design that with the parts in your kit.",
         "Sure, let me rework the design.", "Great! First, let me take a quick look at how your board is set up.",
-        "Got it. You can put the phone down.", "I didn't get a clear photo.",
+        "Got it. You can put the phone down.", "I didn't get a clear photo.", "I'm still checking the photo.",
         "Programming your Arduino now. It takes about twenty seconds.",
         "It works! I can see it responding. You built that. Brilliant job!",
-        "Great, let's carry on.", "Okay, a fresh start. What would you like to build today?",
+        "Great, let's carry on.", "Good question, one second.", "Let me think.", "Okay, one moment.", "Okay, a fresh start. What would you like to build today?",
         "Heads up: we're near the five-minute call limit. If the call drops, just call back within "
         "30 minutes and we'll pick up where we left off.",
     ]
@@ -142,6 +173,10 @@ class BuildSession:
 
         self.engine = BuildEngine(self.kit, mode=self.s.mode, verifier_available=self.verifier is not None,
                                   uploader_available=self.uploader.available)
+        # The existing ArUco tags around the Arduino define the frame used for breadboard overlays.
+        self.marker_tracker = ShieldTracker(ShieldLayout.load(self.s.layout_path), recheck_s=0.25)
+        self._last_marker_update = 0.0
+        self.fingertip_px: tuple[float, float] | None = None
         self._call_started: float | None = None
         self._limit_warned = False
         self.scheduler = SpeechScheduler(self.s.speech_min_interval_s, self.s.speech_repeat_after_s)
@@ -149,11 +184,15 @@ class BuildSession:
 
         self._pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="build")
         self._speech_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="speech")
+        self._said: deque[tuple[float, str]] = deque(maxlen=12)   # (time, line) Pinpoint spoke recently
         self._speech_epoch = 0
         self._results: queue.Queue = queue.Queue()
-        self._inputs: queue.Queue[str] = queue.Queue()
+        self._inputs: queue.Queue[tuple[str, object]] = queue.Queue()
         self._stop = threading.Event()
         self._capture: tuple[AutoCapture, PhotoRequest] | None = None
+        self.continuous_monitoring = False
+        self._monitor_phase: Phase | None = None
+        self._next_monitor_check = 0.0
         self._remote_busy_until = 0.0
         self._last_frame_t = 0.0
         self._last_card_t = 0.0
@@ -227,8 +266,12 @@ class BuildSession:
 
     def command(self, text: str) -> str:
         """Thread-safe: something the builder typed (dashboard, iMessage) or said."""
-        self._inputs.put(text)
+        self._inputs.put(("text", text))
         return "queued"
+
+    def set_continuous_monitoring(self, enabled: bool, command_text: str) -> None:
+        """Only explicit iMessage requests switch the Elegoo flow into continuous checking."""
+        self._inputs.put(("monitoring", (enabled, command_text)))
 
     # ------------------------------------------------------------ main loop
     def _log_line(self, text: str) -> None:
@@ -251,12 +294,41 @@ class BuildSession:
         # caller started talking -> stop speaking first, before anything else is queued
         self._barge_in(time.monotonic())
         for text in self.transport.poll_transcripts():
+            now_t = time.monotonic()
+            recent = [t for when, t in self._said if now_t - when < 25.0]
+            # Echo only arrives while Pinpoint is talking (or just after, given transcription delay); the
+            # builder repeating a phrase Pinpoint suggested ("is this right?") later is a real question.
+            # Only while Pinpoint is still talking: someone answering "carry on, or start a fresh one?" with
+            # "start a fresh one" after she's finished is a real answer, not echo.
+            talking_now = getattr(self.transport, "speaking", None)
+            if talking_now is None:
+                talking_now = now_t < self._remote_busy_until
+            if talking_now and len(text.split()) >= 3 and not self.engine.expects_answer(text)                     and is_echo(text, recent):
+                log.info("Ignored echo of my own voice: %r", text)
+                continue
             self._log_line(f"> {text}")
+            self._hush()                       # they spoke: anything queued from before is out of date
             self._handle(self.engine.on_utterance(text))
         while not self._inputs.empty():
-            text = self._inputs.get_nowait()
-            self._log_line(f"> {text}")
-            self._handle(self.engine.on_utterance(text))
+            kind, payload = self._inputs.get_nowait()
+            if kind == "monitoring":
+                enabled, command_text = payload
+                self._log_line(f"> {command_text}")
+                if enabled and self.verifier is None:
+                    self._set_continuous_monitoring(False)
+                    self._say(Say("Continuous monitoring needs vision checks, which aren't available right now. "
+                                  "I'll keep using picture checks.", "urgent"))
+                else:
+                    self._set_continuous_monitoring(enabled)
+                    self._say(Say(
+                        "Continuous monitoring is on. Keep video pointed at the circuit; I'll check each placement."
+                        if enabled else "Continuous monitoring is off. I'll use picture checks when needed.",
+                        "urgent",
+                    ))
+            else:
+                text = payload
+                self._log_line(f"> {text}")
+                self._handle(self.engine.on_utterance(text))
         while not self._results.empty():
             self._dispatch(*self._results.get_nowait())
 
@@ -271,17 +343,45 @@ class BuildSession:
         self._idle_video(now)
         self._call_limit_warning(now)
         self._handle(self.engine.on_tick(now))
+        self._continuous_monitor_tick(now)
         if self.engine.phase == Phase.TEST and now - self._last_serial_t > 0.5 and self.engine.plan:
             self._last_serial_t = now
             key = self.engine.plan.test.key
             self._handle(self.engine.on_serial(self.serial.receiving(now), self.serial.values(key, now)))
         self._speak(now)
 
+    def _set_continuous_monitoring(self, enabled: bool) -> None:
+        self.continuous_monitoring = enabled
+        self.engine.continuous_monitoring = enabled
+        self._monitor_phase = None
+        self._next_monitor_check = 0.0
+        if enabled and not self.engine.mode_chosen:
+            self.engine.mode = "voice"
+            self.engine.mode_chosen = True
+
+    def _continuous_monitor_tick(self, now: float) -> None:
+        if not self.continuous_monitoring:
+            return
+        phase = self.engine.phase
+        if phase != self._monitor_phase:
+            self._monitor_phase = phase
+            self._next_monitor_check = now + 5.0
+        if phase in (Phase.PLACE, Phase.REVIEW) and not self.engine._pending and now >= self._next_monitor_check:
+            self._next_monitor_check = now + 5.0
+            self._handle(self.engine.on_utterance("done"))
+
     def _process_frame(self, frame: np.ndarray, now: float) -> None:
         self.latest_frame = frame
+        if now - self._last_marker_update >= 0.25:
+            self._last_marker_update = now
+            self.marker_tracker.update(frame, now, force=True)
+            if len(set(self.marker_tracker.visible_ids) & set(self.marker_tracker.layout.markers)) < 3:
+                self.marker_tracker.H_board_from_img = self.marker_tracker.H_img_from_board = None
+        self.fingertip_px = None
         if self.hands is not None:
             hands = self.hands.process(frame, now)
             g = max(hands, key=lambda h: h.gesture_score) if hands else None
+            self.fingertip_px = g.fingertip_px if g else None
             gesture = self.gestures.update(g.gesture if g else None, g.gesture_score if g else 0.0, now)
             if gesture:
                 self._handle(self.engine.on_gesture(gesture))
@@ -302,8 +402,24 @@ class BuildSession:
         cv2.addWeighted(bar, 0.55, img, 0.45, 0, dst=img)
         cv2.putText(img, _ascii(header), (16, 36), cv2.FONT_HERSHEY_SIMPLEX, max(0.6, w / 1500), (255, 255, 255), 2,
                     cv2.LINE_AA)
+        targets = self._visual_hole_targets()
+        if self.engine.mode == "visual" and targets:
+            if self.marker_tracker.ready:
+                img = draw_breadboard_targets(img, self.marker_tracker, targets, self.engine.orientation,
+                                              self.fingertip_px)
+            else:
+                _label(img, "Show at least 3 Arduino corner markers for hole overlays", (16, 82), 0.6, (0, 220, 255), 2)
         _caption_bar(img, st["caption"])
         return img
+
+    def _visual_hole_targets(self) -> list[str]:
+        if self.engine.phase == Phase.REVIEW and self.engine.plan is not None:
+            steps = self.engine.plan.steps
+        elif self.engine.phase in (Phase.FIND, Phase.PLACE, Phase.CHECKING) and self.engine.step is not None:
+            steps = [self.engine.step]
+        else:
+            return []
+        return list(dict.fromkeys(c.to for step in steps for c in step.connections if parse_hole(c.to)))
 
     def _idle_video(self, now: float) -> None:
         if getattr(self.transport, "wants_video", False) and now - self._last_frame_t > 0.5 \
@@ -321,24 +437,35 @@ class BuildSession:
                 self._pool.submit(self._plan_job, a)
             elif isinstance(a, RequestUpload):
                 self._pool.submit(self._upload_job, a.plan)
+            elif isinstance(a, RequestReply):
+                self._pool.submit(self._reply_job, a)
             elif isinstance(a, (RequestSetupCheck, RequestPartID, RequestPlacementCheck, RequestReview, RequestAnswer)):
                 self._request_photo(a)
             elif isinstance(a, Finished):
                 self._finish(a.recap)
 
     def _dispatch(self, kind: str, res) -> None:
+        if kind == "route":
+            self._handle(self.engine.on_route(*res))
+            return
+        if kind == "answer" and isinstance(res, tuple):
+            self._handle(self.engine.on_answer(*res))
+            return
         handler = {
             "plan": self.engine.on_plan_result, "setup": self.engine.on_setup_result,
             "identify": self.engine.on_identify_result, "placement": self.engine.on_placement_result,
             "review": self.engine.on_review_result, "answer": self.engine.on_answer,
-            "upload": self.engine.on_upload_result,
+            "upload": self.engine.on_upload_result, "reply": self.engine.on_answer,
         }[kind]
         self._handle(handler(res))
-        if kind == "plan" and isinstance(res, PlanResult) and res.plan is not None and self.uploader.available:
+        if kind == "plan" and isinstance(res, PlanResult) and res.plan is not None and self.uploader.available \
+                and self.engine.plan is res.plan:          # not a design the builder replaced or cancelled
             self._pool.submit(self._precompile_job, res.plan)
 
     def _say(self, a: Say) -> None:
+        log.info("Pinpoint: %s", a.text)
         self._log_line(a.text)
+        self._said.append((time.monotonic(), a.text))
         self.transport.send_caption(a.text)
         if self.engine.mode != "visual":
             self.scheduler.submit(a, time.monotonic())
@@ -355,6 +482,13 @@ class BuildSession:
             self.scheduler.clear()
             self._remote_busy_until = 0.0
             log.info("Caller interrupted: stopped speaking")
+
+    def _hush(self) -> None:
+        """Stop talking now and forget queued lines (like a person who's been interrupted)."""
+        self._speech_epoch += 1
+        getattr(self.transport, "stop_speech", lambda: None)()
+        self.scheduler.clear()
+        self._remote_busy_until = 0.0
 
     def _send_speech(self, text: str, epoch: int) -> None:
         # Sentence by sentence: the first one starts playing while the next is still being rendered,
@@ -387,12 +521,25 @@ class BuildSession:
             res = self.planner.plan(req.request, req.previous)
         except Exception:  # noqa: BLE001 - never leave the builder waiting in silence
             log.exception("Planner crashed")
-            res = self.planner.fallback(req.request)
+            try:
+                res = self.planner.fallback(req.request)
+            except Exception:  # noqa: BLE001
+                res = PlanResult(None, "Sorry, something went wrong while I was designing that.", "none")
         res.token = req.token
         self._results.put(("plan", res))
 
+    def _reply_job(self, req: RequestReply) -> None:
+        try:
+            res = self.verifier.route(req.text, req.context, req.history, self.engine.mode) if self.verifier else None
+        except Exception:  # noqa: BLE001
+            log.exception("Route failed")
+            res = None
+        self._results.put(("route", (res, req.seq, req.text)))
+
     def _precompile_job(self, plan: BuildPlan) -> None:
         """Compile while the builder wires, and get Claude to fix the sketch if it doesn't build."""
+        if not plan.uses_arduino:
+            return                                   # power-module-only build: no code to compile
         with self._sketch_lock:
             ok_lib, out = self.uploader.install_libraries(plan.libraries)
             if not ok_lib:
@@ -412,12 +559,30 @@ class BuildSession:
                 plan.sketch = fixed
 
     def _upload_job(self, plan: BuildPlan) -> None:
+        try:
+            self._upload_job_inner(plan)
+        except Exception as e:  # noqa: BLE001 - always answer, or the engine waits forever
+            log.exception("Upload job crashed")
+            self.serial.resume()
+            self._results.put(("upload", UploadResult(False, "upload", str(e),
+                                                      "Something went wrong while programming the Arduino. "
+                                                      "Unplug the USB cable, plug it back in, and say ready.")))
+
+    def _upload_job_inner(self, plan: BuildPlan) -> None:
         with self._sketch_lock:  # wait for a background compile/fix to finish first
             port = self._port()
             if port is None:
                 self._results.put(("upload", UploadResult(False, "upload", "no port",
                                                           "I can't find the Arduino. Check the USB cable is plugged "
                                                           "into both the Arduino and the laptop, then say ready.")))
+                return
+            wrong = self.uploader.wrong_board(port)
+            if wrong:
+                log.warning("Board on %s is %s, not an UNO R3", port, wrong)
+                self._results.put(("upload", UploadResult(False, "board", wrong,
+                                                          f"The board plugged in is an {wrong}, not the kit's "
+                                                          "Arduino UNO R3. Plug in the UNO R3, the board with the "
+                                                          "big square USB socket, and say ready.")))
                 return
             self.serial.pause()
             try:
@@ -446,19 +611,25 @@ class BuildSession:
     # ------------------------------------------------------------ photos
     def _request_photo(self, req: PhotoRequest) -> None:
         purpose = _purpose(req)
+        try:
+            req._seq = self.engine.utter_seq      # which utterance this answers (RequestAnswer only matters)
+        except AttributeError:
+            pass
         if self.verifier is None:
             self._fail(req)
             return
         if self._capture is not None:
             self._fail(self._capture[1])
         self._capture = (AutoCapture(purpose, [], time.monotonic(), self.s.capture_timeout_s), req)
-        self._say(Say(_PROMPTS[purpose], "info"))
+        if not self.continuous_monitoring:
+            self._say(Say(_PROMPTS[purpose], "info"))
 
     def _feed_capture(self, frame: np.ndarray, now: float) -> None:
         cap, req = self._capture
         upd = cap.feed(frame, now, None)
         if upd.status == "waiting":
-            if upd.hint:
+            if upd.hint and now - getattr(self, "_last_hint_t", 0.0) >= 4.0:
+                self._last_hint_t = now
                 self._say(Say(upd.hint, "steer", upd.hint_key))
             return
         self._capture = None
@@ -466,7 +637,7 @@ class BuildSession:
             self._say(Say("I didn't get a clear photo.", "info"))
             self._fail(req)
             return
-        if not isinstance(req, (RequestSetupCheck, RequestReview)):
+        if not self.continuous_monitoring and not isinstance(req, (RequestSetupCheck, RequestReview)):
             self._say(Say("Got it. You can put the phone down.", "urgent", "photo_ok"))
         ok, jpg = cv2.imencode(".jpg", upd.frame)
         if ok and isinstance(req, (RequestPlacementCheck, RequestReview)):
@@ -485,7 +656,8 @@ class BuildSession:
             elif isinstance(req, RequestReview):
                 self._results.put(("review", v.review_board(photo, req.expected, mode)))
             else:
-                self._results.put(("answer", v.answer_question(photo, req.question, req.context, mode)))
+                ans = v.answer_question(photo, req.question, req.context, mode)
+                self._results.put(("answer", (ans, getattr(req, "_seq", 0))))
         except Exception:  # noqa: BLE001
             log.exception("Photo check failed")
             self._fail(req)
@@ -525,7 +697,18 @@ class BuildSession:
             usage[k] = usage.get(k, 0) + v
         return {
             **self.engine.view_state(),
-            "guidance": "build",
+            "guidance": "continuous" if self.continuous_monitoring else "snapshot",
+            "continuous_monitoring": self.continuous_monitoring,
+            "marker_ready": self.marker_tracker.ready,
+            "markers": self.marker_tracker.visible_ids,
+            "call_active": self._call_started is not None and not self._stop.is_set()
+            and not getattr(self.transport, "call_ended", False),
+            "call_status": "on call" if self._call_started is not None and not self._stop.is_set()
+            and not getattr(self.transport, "call_ended", False) else
+            "ended" if self._call_started is not None else "waiting",
+            "call_elapsed_s": max(0, int(time.monotonic() - self._call_started))
+            if self._call_started is not None else 0,
+            "session_running": getattr(self, "_thread", None) is not None and self._thread.is_alive(),
             "capturing": self._capture[0].purpose if self._capture else None,
             "claude_usage": usage,
             "fps": round(self.fps, 1),

@@ -216,6 +216,29 @@ parts:
       GND: the pin labelled minus
     library: DHT sensor library
 
+  power_module:
+    name: breadboard power module
+    count: 1
+    touch: a small black board with a round power socket, a USB socket, a push button and pins underneath that clip onto the end of the breadboard
+    layout: module
+    source: true
+    mount: >-
+      Push the power module onto the right-hand end of the breadboard so its pins drop into the two long rails
+      along your edge, with its plus marking over the plus rail. Check its little voltage jumper is set to
+      5 volts, and leave the power cable unplugged for now.
+    leads:
+      plus: the pin under its plus marking
+      minus: the pin under its minus marking
+  fan_motor:
+    name: fan motor
+    count: 1
+    touch: a small metal motor about the size of your thumb, with a plastic fan blade on its shaft and two wires, one red and one black
+    layout: free
+    leads:
+      red: the red wire (plus)
+      black: the black wire (minus)
+    polarity: true
+
 # Arduino UNO R3 header sockets, for touch directions. The builder turns the Arduino so the
 # USB socket points LEFT; then the digital strip runs along the FAR edge and the power and
 # analog strip along the NEAR edge. Sockets are counted from the left (USB) end of each block.

@@ -6,6 +6,7 @@ Set PINPOINT_ARDUINO_CLI if arduino-cli isn't on PATH.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -99,6 +100,29 @@ class Uploader:
         msg = ("I couldn't send the code to the Arduino. Unplug the USB cable, plug it back in, "
                "and say ready to try again.")
         return UploadResult(False, "upload", out, msg)
+
+    def wrong_board(self, port: str) -> str | None:
+        """Name of the board on `port` if arduino-cli recognises it as something other than an UNO R3
+        (e.g. "Arduino UNO Q"), else None. Unrecognised boards (e.g. CH340 clones) are allowed through."""
+        if not self.available:
+            return None
+        ok, out = self._run("board", "list", "--format", "json")
+        if not ok:
+            return None
+        try:
+            data = json.loads(out[out.index("{"):] if "{" in out else out)
+        except (ValueError, json.JSONDecodeError):
+            return None
+        entries = data.get("detected_ports", []) if isinstance(data, dict) else data
+        for entry in entries or []:
+            addr = ((entry.get("port") or {}).get("address") or "").upper()
+            if addr != port.upper():
+                continue
+            boards = entry.get("matching_boards") or []
+            if not boards or any(b.get("fqbn") == self.fqbn for b in boards):
+                return None
+            return boards[0].get("name") or boards[0].get("fqbn") or "unknown board"
+        return None
 
     def install_libraries(self, libraries: list[str]) -> tuple[bool, str]:
         # Shipped inside the arduino:avr core. Servo, LiquidCrystal and Stepper are NOT (the IDE bundles
