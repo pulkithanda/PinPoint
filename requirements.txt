@@ -1,0 +1,18 @@
+anthropic==2.8.0
+faster-whisper==1.2.1
+httpx==0.28.1
+livekit==1.2.1
+livekit-api==1.2.3
+fastapi==0.162.7
+uvicorn[standard]==0.54.0
+mediapipe==1.2.3
+numpy==2.5.4
+opencv-contrib-python==5.0.0.93
+pillow==13.0.0
+pydantic==2.14.3
+pyserial==3.5
+pyttsx3==2.99
+PyYAML==6.0.3
+# tests
+pytest==9.2.0
+livekit-agents==1.8.12

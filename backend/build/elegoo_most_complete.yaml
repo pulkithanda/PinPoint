@@ -1,0 +1,232 @@
+# Parts Pinpoint may design with: ELEGOO UNO R3 "Most Complete" starter kit.
+# Only parts that a blind builder can place on a breadboard with jumper wires, and whose
+# libraries are installed by tools/setup_arduino.py, are listed. Edit `count` to match your box.
+#
+# Lead names are what the planner must use in `connections`. `touch` is how to find the part
+# by feel; `leads` say how to tell the legs apart by feel.
+# `layout` describes how the legs sit when pushed into the breadboard:
+#   inline: legs go into consecutive rows on one side of the groove (in the listed order)
+#   free:   legs bend, so each can go into any hole (resistors, LEDs, sensors on wires)
+#   straddle: pushbutton across the groove; leg_a on one side, leg_b on the other, rows 2 apart
+#   wires: the part has a plug or fixed wires; connect each lead with a jumper wire
+
+kit: ELEGOO UNO R3 Most Complete Starter Kit
+
+parts:
+  led_red:
+    name: red LED
+    count: 5
+    touch: a small dome-shaped bulb with two wire legs, one longer than the other
+    layout: free
+    leads:
+      anode: the long leg (positive)
+      cathode: the short leg (negative), next to the flat edge of the rim
+    polarity: true
+  led_green:
+    name: green LED
+    count: 5
+    touch: a small dome-shaped bulb with two wire legs, one longer than the other
+    layout: free
+    leads:
+      anode: the long leg (positive)
+      cathode: the short leg (negative), next to the flat edge of the rim
+    polarity: true
+  led_yellow:
+    name: yellow LED
+    count: 5
+    touch: a small dome-shaped bulb with two wire legs, one longer than the other
+    layout: free
+    leads:
+      anode: the long leg (positive)
+      cathode: the short leg (negative), next to the flat edge of the rim
+    polarity: true
+  led_blue:
+    name: blue LED
+    count: 5
+    touch: a small dome-shaped bulb with two wire legs, one longer than the other
+    layout: free
+    leads:
+      anode: the long leg (positive)
+      cathode: the short leg (negative), next to the flat edge of the rim
+    polarity: true
+  led_white:
+    name: white LED
+    count: 5
+    touch: a small dome-shaped bulb with two wire legs, one longer than the other
+    layout: free
+    leads:
+      anode: the long leg (positive)
+      cathode: the short leg (negative), next to the flat edge of the rim
+    polarity: true
+  rgb_led:
+    name: RGB LED
+    count: 1
+    touch: a cloudy dome bulb with four legs; one leg is clearly the longest
+    layout: inline
+    leads:
+      red: the single leg on the side of the longest leg
+      cathode: the longest leg (common negative)
+      green: the leg right next to the longest leg, on the other side
+      blue: the outside leg next to green
+    polarity: true
+  resistor_220:
+    name: 220 ohm resistor
+    count: 10
+    touch: a tiny bead-shaped body with a long wire at each end. Resistors all feel the same, so I'll check the colour bands with the camera
+    layout: free
+    leads:
+      end1: either wire end
+      end2: the other wire end
+    resistor: 220
+  resistor_1k:
+    name: 1 kilo-ohm resistor
+    count: 10
+    touch: a tiny bead-shaped body with a long wire at each end. Resistors all feel the same, so I'll check the colour bands with the camera
+    layout: free
+    leads:
+      end1: either wire end
+      end2: the other wire end
+    resistor: 1000
+  resistor_10k:
+    name: 10 kilo-ohm resistor
+    count: 10
+    touch: a tiny bead-shaped body with a long wire at each end. Resistors all feel the same, so I'll check the colour bands with the camera
+    layout: free
+    leads:
+      end1: either wire end
+      end2: the other wire end
+    resistor: 10000
+  button:
+    name: push button
+    count: 5
+    touch: a small square switch with a round plunger on top and four stiff legs
+    layout: straddle
+    leads:
+      leg_a: a corner leg, on your side of the groove
+      leg_b: the diagonally opposite corner leg, across the groove
+  potentiometer:
+    name: potentiometer (knob)
+    count: 2
+    touch: a small blue square with a knob you can turn and three legs in a row
+    layout: inline
+    leads:
+      left: the left leg, with the knob facing you
+      wiper: the middle leg
+      right: the right leg
+  photoresistor:
+    name: light sensor (photoresistor)
+    count: 2
+    touch: a flat disc the size of a pencil end, with a squiggly track on its face and two thin legs
+    layout: free
+    leads:
+      end1: either leg
+      end2: the other leg
+  buzzer_active:
+    name: active buzzer
+    count: 1
+    touch: a black cylinder about the width of a fingertip, with a smooth sealed bottom and two legs, one longer
+    layout: free
+    leads:
+      positive: the long leg
+      negative: the short leg
+    polarity: true
+  buzzer_passive:
+    name: passive buzzer
+    count: 1
+    touch: a black cylinder like the active buzzer, but you can feel a small circuit board on its bottom
+    layout: free
+    leads:
+      positive: the long leg
+      negative: the short leg
+    polarity: true
+  tilt_switch:
+    name: tilt switch
+    count: 1
+    touch: a small metal or plastic tube with two legs; it rattles when you shake it
+    layout: free
+    leads:
+      end1: either leg
+      end2: the other leg
+  hc_sr04:
+    name: ultrasonic distance sensor
+    count: 1
+    touch: a small board with two round metal eyes on the front and four pins along the bottom edge
+    layout: inline
+    leads:
+      VCC: the first pin, with the eyes facing away from you
+      Trig: the second pin
+      Echo: the third pin
+      GND: the fourth pin
+  pir_sensor:
+    name: motion sensor (PIR)
+    count: 1
+    touch: a board with a white plastic dome on top and three pins on the bottom
+    layout: wires
+    leads:
+      VCC: the pin at one end, labelled VCC
+      OUT: the middle pin
+      GND: the pin at the other end
+  sound_sensor:
+    name: sound sensor
+    count: 1
+    touch: a small board with a round silver microphone at one end and four pins at the other
+    layout: wires
+    leads:
+      AO: the first pin, with the pins facing you
+      GND: the second pin
+      VCC: the third pin
+      DO: the fourth pin
+  water_sensor:
+    name: water level sensor
+    count: 1
+    touch: a long thin board with ridged metal stripes and three pins at one end
+    layout: wires
+    leads:
+      S: the left pin, with the pins facing you and stripes up
+      VCC: the middle pin
+      GND: the right pin
+  joystick:
+    name: joystick
+    count: 1
+    touch: a small board with a thumb stick in the middle and five pins along one edge
+    layout: wires
+    leads:
+      GND: the first pin
+      VCC: the second pin
+      VRx: the third pin
+      VRy: the fourth pin
+      SW: the fifth pin
+  servo:
+    name: servo motor
+    count: 1
+    touch: a small blue box with a plastic arm on top and a three-wire cable ending in a plug
+    layout: wires
+    leads:
+      GND: the brown wire, on one edge of the plug
+      VCC: the red wire, in the middle
+      signal: the orange wire, on the other edge
+  dht11:
+    name: temperature and humidity sensor
+    count: 1
+    touch: a small blue box with a grid of holes on its face, on a board with three pins
+    layout: wires
+    leads:
+      S: the signal pin, labelled S
+      VCC: the middle pin
+      GND: the pin labelled minus
+    library: DHT sensor library
+
+# Arduino UNO R3 header sockets, for touch directions. The builder turns the Arduino so the
+# USB socket points LEFT; then the digital strip runs along the FAR edge and the power and
+# analog strip along the NEAR edge. Sockets are counted from the left (USB) end of each block.
+arduino:
+  far_blocks:
+    - [SCL, SDA, AREF, GND, D13, D12, D11, D10, D9, D8]
+    - [D7, D6, D5, D4, D3, D2, D1, D0]
+  near_blocks:
+    - [NC, IOREF, RESET, 3V3, 5V, GND, GND, VIN]
+    - [A0, A1, A2, A3, A4, A5]
+  pwm: [D3, D5, D6, D9, D10, D11]
+
+# Libraries the planner may use: built into the Arduino IDE, or installed by tools/setup_arduino.py.
+libraries: [Servo, DHT sensor library]

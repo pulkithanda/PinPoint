@@ -1,0 +1,43 @@
+# Grove Base Shield port map, in millimetres, in the "board frame".
+#
+# Board frame (as the builder sees the board, sitting in front of it):
+#   x grows to the RIGHT, y grows TOWARD THE BUILDER ("down").
+#   Origin = centre of marker 0.
+#
+# Markers: 4x4_50 ArUco, ids 0-3, printed from markers/aruco_4x4.pdf and taped
+# upright (text side readable from the builder's seat) on the shield corners:
+#   0 = far-left, 1 = far-right, 2 = near-right, 3 = near-left.
+#
+# !! PLACEHOLDER COORDINATES !!  Measure on OUR shield before the demo:
+#   python -m tools.calibrate_ports        (click each port on the live top-down view)
+# `row`/`col` drive "right two ports, down one" steering, so keep them as a grid
+# even if the physical ports are not perfectly aligned.
+
+marker_size_mm: 15.0
+markers:
+  0: [0.0, 0.0]
+  1: [70.0, 0.0]
+  2: [70.0, 56.0]
+  3: [0.0, 56.0]
+
+ports:
+  D2:   {x: 12.0, y: 10.0, row: 0, col: 0}
+  D3:   {x: 27.0, y: 10.0, row: 0, col: 1}
+  D4:   {x: 42.0, y: 10.0, row: 0, col: 2}
+  D5:   {x: 57.0, y: 10.0, row: 0, col: 3}
+  D6:   {x: 12.0, y: 22.0, row: 1, col: 0}
+  D7:   {x: 27.0, y: 22.0, row: 1, col: 1}
+  D8:   {x: 42.0, y: 22.0, row: 1, col: 2}
+  UART: {x: 57.0, y: 22.0, row: 1, col: 3}
+  A0:   {x: 12.0, y: 34.0, row: 2, col: 0}
+  A1:   {x: 27.0, y: 34.0, row: 2, col: 1}
+  A2:   {x: 42.0, y: 34.0, row: 2, col: 2}
+  A3:   {x: 57.0, y: 34.0, row: 2, col: 3}
+  I2C_1: {x: 12.0, y: 46.0, row: 3, col: 0}
+  I2C_2: {x: 27.0, y: 46.0, row: 3, col: 1}
+  I2C_3: {x: 42.0, y: 46.0, row: 3, col: 2}
+  I2C_4: {x: 57.0, y: 46.0, row: 3, col: 3}
+
+# Optional spoken touch anchors, keyed by port. Anything missing is generated
+# from row/col ("second row from the far edge, second port from the left").
+tactile: {}

@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pinpoint Live View</title>
+<style>
+  :root { --bg:#111418; --panel:#1b2027; --text:#eef1f4; --muted:#9aa4b1; --accent:#3ddc84; --warn:#ffcc33; --bad:#ff5c5c; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.4 system-ui, -apple-system, Segoe UI, sans-serif; }
+  header { padding:12px 16px; display:flex; gap:12px; align-items:baseline; flex-wrap:wrap; }
+  header h1 { font-size:20px; margin:0; }
+  header span { color:var(--muted); }
+  main { display:grid; grid-template-columns: minmax(0,2fr) minmax(280px,1fr); gap:16px; padding:0 16px 16px; }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+  .feed img { width:100%; border-radius:10px; background:#000; display:block; }
+  .panel { background:var(--panel); border-radius:10px; padding:14px; margin-bottom:12px; }
+  .caption { font-size:22px; font-weight:600; min-height:2.8em; }
+  .kv { display:grid; grid-template-columns:auto 1fr; gap:4px 12px; color:var(--muted); }
+  .kv b { color:var(--text); font-weight:500; }
+  .ok { color:var(--accent)!important; } .bad { color:var(--bad)!important; } .warn { color:var(--warn)!important; }
+  .buttons { display:flex; flex-wrap:wrap; gap:8px; }
+  button { background:#2a313b; color:var(--text); border:1px solid #3a434f; border-radius:8px; padding:10px 14px; font-size:15px; cursor:pointer; }
+  button:hover { background:#343c47; }
+  form { display:flex; gap:8px; margin-top:10px; }
+  input { flex:1; min-width:0; background:#0f1216; color:var(--text); border:1px solid #3a434f; border-radius:8px; padding:10px; font-size:15px; }
+  ol { margin:0; padding-left:20px; color:var(--muted); }
+  ol li:last-child { color:var(--text); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Pinpoint</h1>
+  <span id="title">connecting...</span>
+</header>
+<main>
+  <section class="feed">
+    <img src="/stream.mjpg" alt="Live camera view with the target port circled and an arrow from the fingertip to it">
+  </section>
+  <aside>
+    <div class="panel"><div class="caption" id="caption" aria-live="polite"></div></div>
+    <div class="panel kv" id="kv"></div>
+    <div class="panel">
+      <div class="buttons">
+        <button data-cmd="voice mode">Voice mode</button>
+        <button data-cmd="visual mode">Visual mode</button>
+        <button data-cmd="what am I holding">What am I holding?</button>
+        <button data-cmd="ready">Ready</button>
+        <button data-cmd="done">Done / check</button>
+        <button data-cmd="repeat">Repeat</button>
+        <button data-cmd="help">Describe port</button>
+        <button data-cmd="back">Back</button>
+        <button data-cmd="skip">Skip</button>
+        <button id="reset">Restart</button>
+      </div>
+      <form id="say"><input id="text" placeholder="Command (ready, done) or a question" aria-label="Command or question"><button>Send</button></form>
+    </div>
+    <div class="panel"><ol id="log"></ol></div>
+  </aside>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+async function send(text) {
+  try { await fetch('/command', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({text})}); } catch (e) {}
+}
+document.querySelectorAll('[data-cmd]').forEach(b => b.onclick = () => send(b.dataset.cmd));
+$('reset').onclick = () => fetch('/reset', {method:'POST'});
+$('say').onsubmit = (e) => { e.preventDefault(); send($('text').value); $('text').value = ''; };
+
+function row(k, v, cls='') { return `<span>${k}</span><b class="${cls}">${v ?? '-'}</b>`; }
+async function poll() {
+  try {
+    const s = await (await fetch('/state')).json();
+    $('title').textContent = `${s.title ?? ''}  step ${Math.min((s.step_index ?? 0) + 1, s.n_steps ?? 0)}/${s.n_steps ?? 0}`;
+    $('caption').textContent = s.caption ?? '';
+    const ser = s.serial || {};
+    $('kv').innerHTML =
+      row('Mode', s.mode || 'not chosen') +
+      row('Guidance', (s.guidance || '') + (s.capturing ? ` (waiting for ${s.capturing} photo)` : ''), s.capturing ? 'warn' : '') +
+      row('Phase', s.phase) +
+      row('Target', (s.targets || []).join(', ')) +
+      row('Fingertip at', s.finger_port, s.finger_port && (s.targets||[]).includes(s.finger_port) ? 'ok' : '') +
+      row('Board', s.shield_ok ? `found (markers ${(s.markers||[]).join(',')})` : 'not found', s.shield_ok ? 'ok' : 'bad') +
+      row('Vision LLM', s.verifier ? 'on' : 'off', s.verifier ? 'ok' : 'warn') +
+      row('Arduino', ser.receiving ? `dist=${ser.dist} cm, lcd=${ser.lcd_ok}` : (ser.connected ? 'connected, silent' : 'not connected'), ser.receiving ? 'ok' : 'warn') +
+      row('FPS', s.fps);
+    $('log').innerHTML = (s.log || []).map(t => `<li>${t.replace(/</g,'&lt;')}</li>`).join('');
+  } catch (e) { $('title').textContent = 'backend not reachable'; }
+  setTimeout(poll, 400);
+}
+poll();
+</script>
+</body>
+</html>

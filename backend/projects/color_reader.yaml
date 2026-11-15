@@ -1,0 +1,32 @@
+# STRETCH project: says / shows the colour of whatever is held over the sensor.
+# Needs its own sketch (not written yet) that prints e.g. "color=red lcd=1".
+id: color_reader
+title: Colour reader
+summary: Hold an object over the colour sensor and the screen shows its colour name.
+
+modules:
+  - I2C Color Sensor
+  - LCD RGB Backlight
+  - Buzzer
+
+steps:
+  - id: color
+    module: I2C Color Sensor
+    spoken_module: the colour sensor
+    targets: [I2C_1, I2C_2, I2C_3, I2C_4]
+    find: Pick up the colour sensor. It has a small white light in the middle. Hold it up to the camera.
+    say: Plug the colour sensor's cable into any I 2 C port.
+    show: "Colour sensor -> any I2C port"
+    tip: The I 2 C ports are along the edge nearest you.
+
+  - id: lcd
+    module: LCD RGB Backlight
+    spoken_module: the screen
+    targets: [I2C_1, I2C_2, I2C_3, I2C_4]
+    find: Pick up the screen. It's the biggest module, with a flat glass window. Hold it up to the camera.
+    say: Plug the screen's cable into another I 2 C port.
+    show: "LCD screen -> another I2C port"
+    tip: Use a different I 2 C port from the colour sensor.
+
+final_check:
+  type: none
