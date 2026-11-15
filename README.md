@@ -6,7 +6,7 @@
 
 **From loose components to a working circuit: one conversation at a time.**
 
-[Watch the demo](https://www.youtube.com/watch?v=Aq5WXmQQooo) · [Devpost](https://devpost.com/software/pinpoint-9pyk0w) · [EmoryHacks 2026](https://emory-hacks-2026.devpost.com/)
+[Watch the demo]([https://www.youtube.com/watch?v=Aq5WXmQQooo](https://www.youtube.com/watch?v=s8XdVeGNmKI)) · [Devpost](https://devpost.com/software/pinpoint-9pyk0w) · [EmoryHacks 2026](https://emory-hacks-2026.devpost.com/)
 
 </div>
 
@@ -262,7 +262,7 @@ Next we want to expand the supported components and verified projects, refine co
 Created at **EmoryHacks 2026**.
 
 - **Devpost:** https://devpost.com/software/pinpoint-9pyk0w
-- **Demo video:** https://www.youtube.com/watch?v=Aq5WXmQQooo
+- **Demo video:** [https://www.youtube.com/watch?v=Aq5WXmQQooo](https://www.youtube.com/watch?v=s8XdVeGNmKI)
 - **Source code:** https://github.com/pulkithanda/PinPoint
 
 > **Your idea. Your parts. Your AI hardware co-builder on FaceTime.**
