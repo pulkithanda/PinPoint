@@ -53,7 +53,7 @@ _PLAN = {
         "test": {
             "type": "object",
             "properties": {
-                "type": {"type": "string", "enum": ["serial"]},
+                "type": {"type": "string", "enum": ["serial", "ask"]},
                 "key": {"type": "string"},
                 "expect": {"type": "string", "enum": ["varies", "present"]},
                 "instruction": {"type": "string", "description": "What the builder does to test it, spoken."},
@@ -119,6 +119,8 @@ LED anode in E<r>, cathode in E<r+1>, resistor from D<r+1> to RAIL:N-, and a wir
 - `why`: one short, complete, friendly sentence a blind builder hears, about what the step does (e.g. "This \
 wire lets pin 9 switch the LED on and off."). No hole names in it.
 
+NO-ARDUINO BUILDS: something that just needs power (a fan, a light that's always on) can use the power_module alone: its plus and minus leads go in RAIL:N+ and RAIL:N-, there's no Arduino, the sketch is an empty string, and test.type is "ask" with an instruction ending in a yes/no question ("Is the fan spinning?"). Prefer this when the request doesn't need any control or sensing.
+
 SKETCH: a complete, compilable Arduino UNO sketch. Serial.begin(9600). Print one line of key=value pairs \
 with integer values (e.g. "dist=42" or "x=512 click=0") at least 5 times a second, so Pinpoint can test the \
 build over USB. `test.key` is the key that proves it works; expect "varies" if it changes when the builder \
@@ -157,7 +159,7 @@ class Planner:
         self._client = client
         self._timeout_s = timeout_s
         self.save_dir = save_dir
-        self.usage = {"calls": 0, "input_tokens": 0, "output_tokens": 0}
+        self.usage = {"calls": 0, "input_tokens": 0, "output_tokens": 0, "elapsed_s": 0.0}
         self._lock = threading.Lock()
 
     @property
@@ -172,6 +174,7 @@ class Planner:
         """One structured request. Returns (parsed dict or None, response content for the history)."""
         import anthropic
 
+        started = time.perf_counter()
         try:
             resp = self.client.beta.messages.create(
                 model=self.model,
@@ -183,17 +186,20 @@ class Planner:
                 messages=messages,
             )
         except anthropic.RateLimitError as e:
-            log.warning("Planner rate limited: %s", e)
+            log.warning("Planner rate limited after %.2fs: %s", time.perf_counter() - started, e)
             return None, None
         except anthropic.APIStatusError as e:
-            log.error("Planner API error %s: %s", e.status_code, e.message)
+            log.error("Planner API error %s after %.2fs: %s", e.status_code, time.perf_counter() - started, e.message)
             return None, None
         except anthropic.APIConnectionError as e:
-            log.error("Planner connection error: %s", e)
+            log.error("Planner connection error after %.2fs: %s", time.perf_counter() - started, e)
             return None, None
+        elapsed_s = time.perf_counter() - started
+        log.info("Planner response received in %.2fs", elapsed_s)
         u = getattr(resp, "usage", None)
         with self._lock:
             self.usage["calls"] += 1
+            self.usage["elapsed_s"] += elapsed_s
             self.usage["input_tokens"] += sum(getattr(u, k, 0) or 0 for k in (
                 "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
             self.usage["output_tokens"] += getattr(u, "output_tokens", 0) or 0

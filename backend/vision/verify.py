@@ -105,8 +105,9 @@ class BoardReview:
 _SETUP_PROMPT = (
     "The builder has put a breadboard and an Arduino UNO on the table and holds the phone above them. The phone "
     "may be held any way round, so the photo may be rotated: do NOT use the image edges to decide directions. "
-    "Wanted layout: the Arduino sits alongside one LONG side of the breadboard (not at a short end), and the "
-    "builder sits at the OTHER long side, facing the Arduino across the breadboard. Seen from the builder's seat, "
+    "Wanted layout: the Arduino sits beyond one LONG side of the breadboard (not at a short end), centered across "
+    "the breadboard's width, with their long edges parallel and touching. The builder sits at the OTHER long side, "
+    "facing the Arduino across the breadboard. Seen from the builder's seat, "
     "the Arduino's USB socket points to the builder's LEFT. "
     "Work out the builder's seat from where the Arduino is (opposite long side), then answer from the builder's "
     "point of view: is the layout as wanted? Which half of the breadboard is nearest the builder (A-E or F-J, "
@@ -114,7 +115,8 @@ _SETUP_PROMPT = (
     "outermost rail strip plus (red line) or minus (blue line)? "
     "If the layout is wrong, `fix` says in one or two short, friendly spoken sentences what to move, in the "
     "builder's terms (e.g. 'Turn the Arduino round so its USB socket points to your left.'). Otherwise `fix` "
-    "is empty."
+    "is empty. Mark the layout incorrect only when the mismatch is clearly visible; use unsure when the photo "
+    "does not let you judge the orientation reliably."
 )
 _SETUP_SCHEMA = {
     "type": "object",
@@ -123,7 +125,8 @@ _SETUP_SCHEMA = {
         "row1_end": {"type": "string", "enum": ["left", "right", "unsure"]},
         "near_outer_rail": {"type": "string", "enum": ["+", "-", "unsure"]},
         "board_visible": {"type": "boolean", "description": "Both a breadboard and an Arduino are in the photo."},
-        "layout_ok": {"type": "boolean", "description": "The layout matches what's wanted."},
+        "layout_ok": {"type": "string", "enum": ["correct", "incorrect", "unsure"],
+                      "description": "Use incorrect only when a mismatch is clearly visible; otherwise unsure."},
         "fix": {"type": "string"},
         "description": {"type": "string"},
     },
@@ -179,13 +182,13 @@ class Verifier:
         self.client = anthropic.Anthropic(timeout=timeout_s, max_retries=1)
         self.model = model
         self.effort = effort
-        self.usage = {"calls": 0, "input_tokens": 0, "output_tokens": 0}
+        self.usage = {"calls": 0, "input_tokens": 0, "output_tokens": 0, "elapsed_s": 0.0}
         self._usage_lock = threading.Lock()
         # Every call's photo, prompt and answer, so model/effort changes can be replayed and compared later.
         save = os.environ.get("PINPOINT_SAVE_CLAUDE_CALLS", "1").strip().lower() not in ("0", "false", "no", "off")
         self.call_dir = (Path(__file__).resolve().parents[2] / "cache" / "claude_calls") if save else None
 
-    def _record(self, kind: str, image_b64: str, prompt: str, schema: dict | None, resp, answer,
+    def _record(self, kind: str, image_b64: str, prompt: str, schema: dict | None, resp, answer, elapsed_s: float,
                 system: str = _SYSTEM) -> None:
         u = getattr(resp, "usage", None)
         tin = (getattr(u, "input_tokens", 0) or 0) + (getattr(u, "cache_read_input_tokens", 0) or 0) \
@@ -195,9 +198,12 @@ class Verifier:
             self.usage["calls"] += 1
             self.usage["input_tokens"] += tin
             self.usage["output_tokens"] += tout
+            self.usage["elapsed_s"] += elapsed_s
             total = dict(self.usage)
-        log.info("Claude %s: %d in / %d out tokens (this session: %d calls, %d in / %d out)",
-                 kind, tin, tout, total["calls"], total["input_tokens"], total["output_tokens"])
+        log.info("Claude %s completed in %.2fs: %d in / %d out tokens "
+                 "(this session: %d calls, %.2fs, %d in / %d out)",
+                 kind, elapsed_s, tin, tout, total["calls"], total["elapsed_s"],
+                 total["input_tokens"], total["output_tokens"])
         if self.call_dir is None:
             return
         try:
@@ -207,6 +213,7 @@ class Verifier:
             stem.with_suffix(".json").write_text(json.dumps({
                 "kind": kind, "model": self.model, "effort": self.effort, "system": system, "prompt": prompt,
                 "schema": schema, "answer": answer, "input_tokens": tin, "output_tokens": tout,
+                "duration_s": round(elapsed_s, 3),
             }, indent=2), encoding="utf-8")
         except OSError as e:
             log.warning("Could not save the Claude call record: %s", e)
@@ -215,6 +222,7 @@ class Verifier:
              system: str = _SYSTEM) -> dict | str | None:
         """One image + prompt. Returns parsed JSON if `schema` is given, else plain text."""
         a = self._anthropic
+        started = time.perf_counter()
         output_config: dict = {"effort": self.effort}
         if schema is not None:
             output_config["format"] = {"type": "json_schema", "schema": schema}
@@ -235,17 +243,18 @@ class Verifier:
                 }],
             )
         except a.RateLimitError as e:
-            log.warning("Claude rate limited: %s", e)
+            log.warning("Claude rate limited after %.2fs: %s", time.perf_counter() - started, e)
             return None
         except a.APIStatusError as e:
-            log.error("Claude API error %s: %s", e.status_code, e.message)
+            log.error("Claude API error %s after %.2fs: %s", e.status_code, time.perf_counter() - started, e.message)
             return None
         except a.APIConnectionError as e:
-            log.error("Claude connection error: %s", e)
+            log.error("Claude connection error after %.2fs: %s", time.perf_counter() - started, e)
             return None
+        elapsed_s = time.perf_counter() - started
         if resp.stop_reason == "refusal":
             log.warning("Claude declined the verification request")
-            self._record(kind, image_b64, prompt, schema, resp, None, system)
+            self._record(kind, image_b64, prompt, schema, resp, None, elapsed_s, system)
             return None
         text = "".join(b.text for b in resp.content if b.type == "text")
         if schema is None:
@@ -256,7 +265,7 @@ class Verifier:
             except json.JSONDecodeError:
                 log.error("Claude returned non-JSON: %r", text[:200])
                 out = None
-        self._record(kind, image_b64, prompt, schema, resp, out, system)
+        self._record(kind, image_b64, prompt, schema, resp, out, elapsed_s, system)
         return out
 
     # ------------------------------------------------------------ breadboard (Elegoo kit)
@@ -270,7 +279,7 @@ class Verifier:
             return v if v in allowed else None
         def flag(key):
             return out.get(key) if isinstance(out.get(key), bool) else None
-        ok = flag("layout_ok")
+        ok = {"correct": True, "incorrect": False}.get(out.get("layout_ok"))
         return BoardSetup(pick("near_half", ("AE", "FJ")), pick("row1_end", ("left", "right")),
                           pick("near_outer_rail", ("+", "-")), ok, out.get("description", ""),
                           flag("board_visible"), ok, (out.get("fix") or "").strip())
@@ -368,6 +377,114 @@ class Verifier:
                 next((p for p in ports if p.startswith("I2C")), seen)
         return PlugCheck(plugged, seen, out.get("description", ""))
 
+    def route(self, said: str, state: str, history: list[tuple[str, str]], mode: str) -> dict | None:
+        """Decide what Pinpoint should DO about something the builder said, and what to say.
+        Returns {"action": ..., "step": n, "say": "..."} or None if Claude is unavailable."""
+        a = self._anthropic
+        convo = "\n".join(f"{who}: {text}" for who, text in history[-8:]) or "(start of call)"
+        audience = ("Pinpoint speaks to a blind builder: touch and position directions, never colour alone."
+                    if mode != "visual" else "Pinpoint's words are shown as captions to a Deaf builder: keep them short.")
+        prompt = (
+            f"BUILD STATE\n{state}\n\nRECENT CONVERSATION\n{convo}\n\n"
+            f"The builder just said: \"{said}\"\n\n{audience}\n"
+            "Decide what Pinpoint does next. Actions:\n"
+            "- answer: just reply (a question or comment the plan can answer). Put the full answer in `say`.\n"
+            "- go_to_step: move the build to step `step` (1-based) and give that step's instructions. Use it when the "
+            "builder says something isn't done yet, asks how or where to place a part or wire from another step, "
+            "or is clearly on a different step than Pinpoint thinks. `say` is a short lead-in only (the step's "
+            "own directions follow automatically).\n"
+            "- next: they've finished what Pinpoint is waiting for (e.g. 'it's in', 'I did it').\n"
+            "- back: they want the previous step.\n"
+            "- program: (re)program the Arduino now: they've plugged in a board or cable, swapped boards, or ask "
+            "to upload or program it. Pinpoint can only program the Elegoo UNO R3.\n"
+            "- look: they ask Pinpoint to look or check, or it can't be answered without seeing the board.\n"
+            "- restart: they want to build something else.\n"
+            "- ignore: background talk or noise not meant for Pinpoint (say nothing).\n"
+            "Prefer the plan over the camera: when they ask where a wire or part goes, answer with the exact "
+            "spot, or use go_to_step for the step that places it. Use look only when they ask you to look or "
+            "check, or the answer truly depends on what's physically on the board (photos are slow). Never use "
+            "look for a 'where does this go?' question: if you can't tell which wire they hold, list where each "
+            "remaining wire goes (they may simply not have finished), or go_to_step to the first step they "
+            "haven't done.\n"
+            "Never say Pinpoint is doing something (programming, checking, moving on) unless that's the action "
+            "you chose; the action is what actually happens.\n"
+            "Rules: listen to what they actually said and act on it. Never repeat their words back. Never claim "
+            "something is done that they say isn't. Be warm and brief: at most two short sentences in `say`, under 30 words, plain directions first. Use "
+            "the exact holes and pins from the build state. If they're stuck or confused, slow down and guide "
+            "them to the next concrete thing to do."
+        )
+        schema = {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["answer", "go_to_step", "next", "back", "look", "program",
+                                                       "restart", "ignore"]},
+                "step": {"type": "integer", "description": "1-based step number for go_to_step, else 0."},
+                "say": {"type": "string"},
+            },
+            "required": ["action", "step", "say"],
+            "additionalProperties": False,
+        }
+        t0 = time.monotonic()
+        try:
+            resp = self.client.beta.messages.create(
+                model=self.model, max_tokens=1024, system=_BB_SYSTEM,
+                betas=["server-side-fallback-2026-07-01"], fallbacks="default",
+                output_config={"effort": "low", "format": {"type": "json_schema", "schema": schema}},
+                messages=[{"role": "user", "content": prompt}],
+            )
+        except (a.RateLimitError, a.APIStatusError, a.APIConnectionError) as e:
+            log.warning("Claude route failed: %s", e)
+            return None
+        if resp.stop_reason == "refusal":
+            return None
+        text = "".join(b.text for b in resp.content if b.type == "text").strip()
+        u = getattr(resp, "usage", None)
+        with self._usage_lock:
+            self.usage["calls"] += 1
+            self.usage["input_tokens"] += getattr(u, "input_tokens", 0) or 0
+            self.usage["output_tokens"] += getattr(u, "output_tokens", 0) or 0
+        try:
+            out = json.loads(text)
+        except json.JSONDecodeError:
+            log.error("Route returned non-JSON: %r", text[:200])
+            return None
+        log.info("Route (%.1fs) %r -> %s step %s: %s", time.monotonic() - t0, said, out.get("action"),
+                 out.get("step"), out.get("say", "")[:120])
+        return out
+
+    def reply(self, said: str, context: str, mode: str) -> str | None:
+        """Answer something the builder said (question, problem, comment) from the build context alone.
+        Text only: fast and cheap. If it really needs a look, the answer says to ask "is this right?"."""
+        a = self._anthropic
+        audience = ("It is spoken aloud to a blind builder: give touch and position directions, never colour alone."
+                    if mode != "visual" else "It is shown as a caption to a Deaf builder: keep it short.")
+        prompt = (f"Build context: {context}\n{audience}\nThe builder just said: \"{said}\"\n"
+                  "Reply as Pinpoint, a warm, practical build coach, in one to three short spoken sentences. "
+                  "Actually help: answer the question or solve the problem using the context (exact holes and "
+                  "pins). If they describe something unexpected (wrong board, missing part, it doesn't fit), say "
+                  "what to do. If you'd need to see the board, tell them to hold the phone over it and ask "
+                  "\"is this right?\". Never just repeat what they said back to them. If it's background talk "
+                  "not meant for you, reply with an empty string.")
+        try:
+            resp = self.client.beta.messages.create(
+                model=self.model, max_tokens=1024, system=_BB_SYSTEM,
+                betas=["server-side-fallback-2026-07-01"], fallbacks="default",
+                output_config={"effort": "low"},
+                messages=[{"role": "user", "content": prompt}],
+            )
+        except (a.RateLimitError, a.APIStatusError, a.APIConnectionError) as e:
+            log.warning("Claude reply failed: %s", e)
+            return None
+        if resp.stop_reason == "refusal":
+            return None
+        text = "".join(b.text for b in resp.content if b.type == "text").strip()
+        u = getattr(resp, "usage", None)
+        with self._usage_lock:
+            self.usage["calls"] += 1
+            self.usage["input_tokens"] += getattr(u, "input_tokens", 0) or 0
+            self.usage["output_tokens"] += getattr(u, "output_tokens", 0) or 0
+        return text.strip('"') or ""
+
     def answer_question(self, frame_bgr: np.ndarray, question: str, context: str, mode: str) -> str | None:
         """Free-form question from the builder, answered from one photo."""
         audience = ("The answer will be read aloud to a blind builder: describe things by touch, shape and "
@@ -377,8 +494,10 @@ class Verifier:
         prompt = (
             f"Context: {context}\n{audience}\n"
             f"The builder asks: \"{question}\"\n"
-            "Answer in at most two short sentences, based only on what the photo shows. "
-            "If the photo doesn't show enough to answer, say what to point the camera at instead."
+            "Answer in at most two short sentences (under 30 words), based only on what the photo shows. "
+            "If you can't make out the exact holes or pins, don't describe vague shapes or guess where wires go: "
+            "say in one sentence that you can't see it clearly and exactly where to hold the phone (e.g. 'Hold the "
+            "phone a hand's width above rows 10 and 11')."
         )
         out = self._ask(encode_jpeg(frame_bgr), prompt, None, kind="question")
         return out if isinstance(out, str) else None

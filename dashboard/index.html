@@ -3,19 +3,30 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Pinpoint Live View</title>
+<meta name="theme-color" content="#111418">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%231b2027'/%3E%3Ccircle cx='32' cy='32' r='18' fill='none' stroke='%233ddc84' stroke-width='6'/%3E%3Ccircle cx='32' cy='32' r='5' fill='%23ffcc33'/%3E%3C/svg%3E">
+<title>PinPoint</title>
 <style>
   :root { --bg:#111418; --panel:#1b2027; --text:#eef1f4; --muted:#9aa4b1; --accent:#3ddc84; --warn:#ffcc33; --bad:#ff5c5c; }
   * { box-sizing: border-box; }
   body { margin:0; background:var(--bg); color:var(--text); font:16px/1.4 system-ui, -apple-system, Segoe UI, sans-serif; }
-  header { padding:12px 16px; display:flex; gap:12px; align-items:baseline; flex-wrap:wrap; }
-  header h1 { font-size:20px; margin:0; }
+  header { padding:14px 18px; display:flex; gap:12px; align-items:baseline; flex-wrap:wrap; border-bottom:1px solid #29313a; margin-bottom:14px; }
+  header h1 { font-size:24px; letter-spacing:.02em; margin:0; }
   header span { color:var(--muted); }
-  main { display:grid; grid-template-columns: minmax(0,2fr) minmax(280px,1fr); gap:16px; padding:0 16px 16px; }
+  main { display:grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap:16px; padding:0 18px 18px; align-items:start; }
   @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
   .feed img { width:100%; border-radius:10px; background:#000; display:block; }
   .panel { background:var(--panel); border-radius:10px; padding:14px; margin-bottom:12px; }
+  .panel h2 { font-size:14px; color:var(--muted); font-weight:600; letter-spacing:.04em; text-transform:uppercase; margin:0 0 10px; }
   .caption { font-size:22px; font-weight:600; min-height:2.8em; }
+  .transcript { height:180px; overflow:auto; }
+  .transcript ol { margin:0; padding-left:20px; color:var(--muted); }
+  .transcript li { padding:3px 0; overflow-wrap:anywhere; }
+  .transcript li:last-child { color:var(--text); }
+  .statuses { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
+  .status { background:#11161c; border:1px solid #303944; border-radius:9px; padding:9px 10px; min-width:0; }
+  .status span { display:block; color:var(--muted); font-size:12px; }
+  .status b { display:block; margin-top:3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .kv { display:grid; grid-template-columns:auto 1fr; gap:4px 12px; color:var(--muted); }
   .kv b { color:var(--text); font-weight:500; }
   .ok { color:var(--accent)!important; } .bad { color:var(--bad)!important; } .warn { color:var(--warn)!important; }
@@ -24,21 +35,31 @@
   button:hover { background:#343c47; }
   form { display:flex; gap:8px; margin-top:10px; }
   input { flex:1; min-width:0; background:#0f1216; color:var(--text); border:1px solid #3a434f; border-radius:8px; padding:10px; font-size:15px; }
-  ol { margin:0; padding-left:20px; color:var(--muted); }
-  ol li:last-child { color:var(--text); }
+  footer { padding:6px 18px 18px; text-align:center; color:var(--muted); }
+  footer q { color:var(--text); font-size:15px; }
+  footer p { margin:5px 0 0; font-size:13px; }
 </style>
 </head>
 <body>
 <header>
-  <h1>Pinpoint</h1>
+  <h1>PinPoint</h1>
   <span id="title">connecting...</span>
 </header>
 <main>
   <section class="feed">
-    <img src="/stream.mjpg" alt="Live camera view with the target port circled and an arrow from the fingertip to it">
+    <img src="/stream.mjpg" alt="Live camera view from the active call">
   </section>
   <aside>
     <div class="panel"><div class="caption" id="caption" aria-live="polite"></div></div>
+    <div class="panel transcript">
+      <h2>Live transcript</h2>
+      <ol id="log" aria-live="polite"></ol>
+    </div>
+    <div class="panel statuses" aria-label="Call status">
+      <div class="status"><span>Backend</span><b id="running">Connecting</b></div>
+      <div class="status"><span>Call</span><b id="call">Waiting</b></div>
+      <div class="status"><span>Call time</span><b id="elapsed">00:00</b></div>
+    </div>
     <div class="panel kv" id="kv"></div>
     <div class="panel">
       <div class="buttons">
@@ -55,37 +76,66 @@
       </div>
       <form id="say"><input id="text" placeholder="Command (ready, done) or a question" aria-label="Command or question"><button>Send</button></form>
     </div>
-    <div class="panel"><ol id="log"></ol></div>
   </aside>
 </main>
+<footer><q>Small steps. Clear guidance. A circuit built together.</q><p>PinPoint — making hands-on building more accessible.</p></footer>
 <script>
 const $ = (id) => document.getElementById(id);
 async function send(text) {
-  try { await fetch('/command', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({text})}); } catch (e) {}
+  try {
+    const r = await fetch('/command', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({text})});
+    if (!r.ok) throw new Error(`Command failed (${r.status})`);
+  } catch (e) { $('title').textContent = 'Could not send command'; }
 }
 document.querySelectorAll('[data-cmd]').forEach(b => b.onclick = () => send(b.dataset.cmd));
 $('reset').onclick = () => fetch('/reset', {method:'POST'});
 $('say').onsubmit = (e) => { e.preventDefault(); send($('text').value); $('text').value = ''; };
 
-function row(k, v, cls='') { return `<span>${k}</span><b class="${cls}">${v ?? '-'}</b>`; }
+function row(k, v, cls='') {
+  const key = document.createElement('span');
+  const value = document.createElement('b');
+  key.textContent = k;
+  value.textContent = v ?? '-';
+  value.className = cls;
+  $('kv').append(key, value);
+}
+function elapsed(seconds) {
+  const n = Math.max(0, Math.floor(seconds || 0));
+  return `${String(Math.floor(n / 60)).padStart(2, '0')}:${String(n % 60).padStart(2, '0')}`;
+}
 async function poll() {
   try {
     const s = await (await fetch('/state')).json();
     $('title').textContent = `${s.title ?? ''}  step ${Math.min((s.step_index ?? 0) + 1, s.n_steps ?? 0)}/${s.n_steps ?? 0}`;
     $('caption').textContent = s.caption ?? '';
+    $('running').textContent = s.session_running ? 'Running' : 'Stopped';
+    $('running').className = s.session_running ? 'ok' : 'warn';
+    $('call').textContent = s.call_status || (s.call_active ? 'On call' : 'Waiting');
+    $('call').className = s.call_active ? 'ok' : 'warn';
+    $('elapsed').textContent = elapsed(s.call_elapsed_s);
     const ser = s.serial || {};
-    $('kv').innerHTML =
-      row('Mode', s.mode || 'not chosen') +
-      row('Guidance', (s.guidance || '') + (s.capturing ? ` (waiting for ${s.capturing} photo)` : ''), s.capturing ? 'warn' : '') +
-      row('Phase', s.phase) +
-      row('Target', (s.targets || []).join(', ')) +
-      row('Fingertip at', s.finger_port, s.finger_port && (s.targets||[]).includes(s.finger_port) ? 'ok' : '') +
-      row('Board', s.shield_ok ? `found (markers ${(s.markers||[]).join(',')})` : 'not found', s.shield_ok ? 'ok' : 'bad') +
-      row('Vision LLM', s.verifier ? 'on' : 'off', s.verifier ? 'ok' : 'warn') +
-      row('Arduino', ser.receiving ? `dist=${ser.dist} cm, lcd=${ser.lcd_ok}` : (ser.connected ? 'connected, silent' : 'not connected'), ser.receiving ? 'ok' : 'warn') +
-      row('FPS', s.fps);
-    $('log').innerHTML = (s.log || []).map(t => `<li>${t.replace(/</g,'&lt;')}</li>`).join('');
-  } catch (e) { $('title').textContent = 'backend not reachable'; }
+    $('kv').replaceChildren();
+    row('Mode', s.mode || 'not chosen');
+    row('Guidance', (s.guidance || '') + (s.capturing ? ` (checking ${s.capturing})` : ''));
+    row('Continuous monitoring', s.continuous_monitoring ? 'on' : 'off', s.continuous_monitoring ? 'ok' : '');
+    row('Phase', s.phase);
+    row('Target', (s.targets || []).join(', '));
+    row('Fingertip at', s.finger_port, s.finger_port && (s.targets||[]).includes(s.finger_port) ? 'ok' : '');
+    if ('shield_ok' in s) row('Board', s.shield_ok ? `found (markers ${(s.markers||[]).join(',')})` : 'not found', s.shield_ok ? 'ok' : 'bad');
+    if ('marker_ready' in s) row('Calibration markers', s.marker_ready ? `found (${(s.markers||[]).join(',')})` : 'not found', s.marker_ready ? 'ok' : 'warn');
+    row('Vision LLM', s.verifier ? 'on' : 'off', s.verifier ? 'ok' : 'warn');
+    row('Arduino', ser.receiving ? `dist=${ser.dist} cm, lcd=${ser.lcd_ok}` : (ser.connected ? 'connected, silent' : 'not connected'), ser.receiving ? 'ok' : 'warn');
+    row('FPS', s.fps);
+    const log = $('log');
+    const wasAtBottom = log.parentElement.scrollTop + log.parentElement.clientHeight >= log.parentElement.scrollHeight - 24;
+    log.replaceChildren();
+    for (const text of (s.log || [])) {
+      const li = document.createElement('li');
+      li.textContent = text;
+      log.append(li);
+    }
+    if (wasAtBottom) log.parentElement.scrollTop = log.parentElement.scrollHeight;
+  } catch (e) { $('title').textContent = 'Backend not reachable'; }
   setTimeout(poll, 400);
 }
 poll();

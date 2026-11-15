@@ -98,6 +98,7 @@ def _sapi_renderer():
 
         comtypes.CoInitialize()
         voice = comtypes.client.CreateObject("SAPI.SpVoice")
+        voice.Rate = 1
         from comtypes.gen import SpeechLib
     except Exception as e:
         log.warning("Direct SAPI unavailable (%s); using pyttsx3 for clips", e)
@@ -134,7 +135,7 @@ def _neural_renderer():
     except ImportError:
         log.info("edge-tts not installed: using the offline Windows voice (pip install edge-tts for a natural one)")
         return None
-    rate = os.environ.get("PINPOINT_VOICE_RATE", "+8%")
+    rate = os.environ.get("PINPOINT_VOICE_RATE", "+20%")
 
     def render(text: str, path: Path) -> None:
         mp3 = path.with_suffix(".tmp.mp3")
@@ -158,7 +159,7 @@ def _neural_renderer():
             mp3.unlink(missing_ok=True)
 
     log.info("Using the neural voice %s", voice)
-    render.voice = voice  # type: ignore[attr-defined]
+    render.cache_key = f"{voice}|{rate}"  # type: ignore[attr-defined]
     return render
 
 
@@ -178,7 +179,7 @@ class TTSWorker:
                 cls._shared[key] = cls(cache_dir, speak_locally=speak_locally)
             return cls._shared[key]
 
-    def __init__(self, cache_dir: Path, rate_wpm: int = 185, speak_locally: bool = True):
+    def __init__(self, cache_dir: Path, rate_wpm: int = 210, speak_locally: bool = True):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.rate_wpm = rate_wpm
@@ -232,11 +233,13 @@ class TTSWorker:
 
     def clip_path(self, text: str) -> Path:
         # Clips from different voices never mix in the cache.
-        key = f"{getattr(self._neural, 'voice', 'sapi')}|{text}" if self._neural is not None else text
+        profile = self._neural.cache_key if self._neural is not None else f"sapi-rate1|{self.rate_wpm}"
+        key = f"{profile}|{text}"
         return self.cache_dir / (hashlib.sha1(key.encode()).hexdigest()[:16] + ".wav")
 
     def _fallback_path(self, text: str) -> Path:
-        return self.cache_dir / (hashlib.sha1(text.encode()).hexdigest()[:16] + ".wav")
+        key = f"sapi-fallback|{self.rate_wpm}|{text}"
+        return self.cache_dir / (hashlib.sha1(key.encode()).hexdigest()[:16] + ".wav")
 
     def say(self, text: str) -> None:
         self.busy = True  # set immediately so the scheduler doesn't double-book

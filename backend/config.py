@@ -78,7 +78,7 @@ class Settings:
 
     # Which kit the call guides: "elegoo" (breadboard, judge-chosen builds) or "grove" (Base Shield script)
     kit: str = field(default_factory=lambda: _env("PINPOINT_KIT", "elegoo").strip().lower())
-    planner_effort: str = field(default_factory=lambda: _env("PINPOINT_PLANNER_EFFORT", "medium"))
+    planner_effort: str = field(default_factory=lambda: _env("PINPOINT_PLANNER_EFFORT", "low"))
     # Stop talking the moment the caller starts speaking (turn off if the phone echoes Pinpoint's voice back)
     barge_in: bool = field(default_factory=lambda: _env_bool("PINPOINT_BARGE_IN", True))
     # Chert ends calls at 5 minutes (trial and Shared plans): warn 30 s before; offer to resume on call-back

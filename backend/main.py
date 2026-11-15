@@ -96,8 +96,11 @@ async def chert_imessage_webhook(request: Request):
         STATE["messaging"].recipient = sender  # reply to whoever is texting the line
     sess = STATE["session"]
     if text and sess is not None:
-        sess.transcript_log.append(f"> {text}")
-        sess.command(text)
+        monitor = chert_adapter.continuous_monitoring_command(text)
+        if monitor is not None and hasattr(sess, "set_continuous_monitoring"):
+            sess.set_continuous_monitoring(monitor, text)
+        else:
+            sess.command(text)
     return JSONResponse({"ok": True})
 
 

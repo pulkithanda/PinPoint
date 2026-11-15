@@ -17,6 +17,7 @@ RequestUpload, RequestAnswer, Finished.
 """
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -85,12 +86,21 @@ class RequestUpload:
 
 
 @dataclass
+class RequestReply:
+    """Something the builder said that isn't a command: Claude decides what to do (route) and what to say."""
+    text: str
+    context: str
+    history: list = field(default_factory=list)
+    seq: int = 0            # the utterance it answers; a newer utterance makes it stale
+
+
+@dataclass
 class Finished:
     recap: str
 
 
 Action = Union[Say, RequestPlan, RequestSetupCheck, RequestPartID, RequestPlacementCheck, RequestReview,
-               RequestUpload, RequestAnswer, Finished]
+               RequestUpload, RequestAnswer, RequestReply, Finished]
 
 YES = {"yes", "yeah", "yep", "sure", "ok", "okay", "let's go", "lets go", "go", "sounds good", "do it",
        "build it", "let's build it", "great", "perfect", "yes please", "go ahead", "start"}
@@ -98,22 +108,7 @@ NO = {"no", "nope", "something else", "never mind", "nevermind", "cancel", "diff
 _READY = ("ready", "next", "done", "got it", "okay", "ok", "continue", "it's in", "finished", "in", "yes", "plugged in",
           "all set", "set up", "did it", "did that", "done it", "it's done", "that's done", "already", "i'm ready",
           "im ready", "it's there", "yep", "yeah")
-_READY_ANYWHERE = ("already", "all set", "i did that", "it's already", "its already", "i've done", "ive done")
-
-
-_VERBS = {"brings", "connects", "powers", "grounds", "limits", "makes", "gives", "reads", "tells", "times",
-          "switches", "drives", "sends", "joins", "feeds", "lets", "turns", "carries", "links"}
-
-
-def _sentence(why: str, subject: str) -> str:
-    """Library explanations are short fragments ("Brings 5 volts to the plus rail."): make them speakable."""
-    why = why.strip()
-    if not why:
-        return ""
-    first = why.split()[0].lower()
-    if first in _VERBS:
-        why = f"{subject} {why[0].lower()}{why[1:]}"
-    return why if why.endswith((".", "!", "?")) else why + "."
+_READY_ANYWHERE = ("go ahead", "let's continue", "lets continue", "keep going", "let's keep going", "already", "all set", "i did that", "it's already", "its already", "i've done", "ive done")
 
 
 def _norm(text: str) -> str:
@@ -156,6 +151,44 @@ def _affirmative(t: str) -> bool:
     return t in YES or (bool(words) and words[0] in _YES_WORDS) or any(p in t for p in _YES_PHRASES)
 
 
+_VAGUE_EXTRA = {"new", "one", "project", "thing", "things", "stuff", "anything", "something", "else", "different",
+                "another", "cool", "fun", "idea", "ideas", "random", "start", "fresh", "build", "again", "now"}
+
+
+def _vague(t: str) -> bool:
+    """"build a new one", "something cool": no idea what to make yet."""
+    from backend.build.library import _FILLER
+    words = [w for w in t.split() if w not in _FILLER and w not in _VAGUE_EXTRA]
+    return not words
+
+
+def _needs_eyes(t: str) -> bool:
+    """Questions only a photo can answer: "is this right?", "can you see it?", "what am I holding?".
+    Short, direct requests only: in a long sentence "see" or "right" is usually just conversation
+    (the router decides those, and it has its own look action)."""
+    padded = f" {t} "
+    if any(w in padded for w in (" take a look", " look at my", " look at the", " look at this", " check my",
+                                 " check the", " check this", " is this right", " is it right", " can you see")):
+        return True
+    if len(t.split()) > 14:
+        return False
+    return any(w in padded for w in (" see ", " look", " is this", " is it ", " right ", " correct", " check",
+                                     " tell me what you think", " what do you think", " how does it look",
+                                     " did i ", " am i ", " does this", " wrong", " backwards", " holding",
+                                     " this one", " these ", " what is this", " what's this"))
+
+
+def brief(text: str, max_sentences: int = 2, max_words: int = 40) -> str:
+    """Spoken replies stay short: long answers pile up and the builder can't get a word in."""
+    text = " ".join(text.split())
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    out = " ".join(sentences[:max_sentences])
+    words = out.split()
+    if len(words) > max_words:
+        out = " ".join(words[:max_words]).rstrip(",;:") + "."
+    return out
+
+
 def _cut_off(text: str) -> bool:
     """Speech-to-text marks a sentence that trailed off ("I want to build a...")."""
     s = text.strip()
@@ -164,9 +197,12 @@ def _cut_off(text: str) -> bool:
 
 def _command(t: str) -> str | None:
     if t in ("stop", "wait", "hold on", "hang on", "pause", "quiet", "be quiet", "shh", "shush", "one sec",
-             "one second", "just a sec", "just a second", "stop talking", "ok stop", "okay stop", "wait wait"):
+             "one second", "just a sec", "just a second", "stop talking", "ok stop", "okay stop", "wait wait",
+             "shut up", "shut up shut up", "be quiet please", "enough", "stop stop"):
         return "stop"
-    if t in ("repeat", "say again", "say that again", "repeat that", "what", "pardon", "sorry"):
+    if t in ("repeat", "say again", "say that again", "repeat that", "what", "pardon", "sorry") or (
+            len(t.split()) <= 8 and any(p in t for p in ("repeat", "say that again", "say it again",
+                                                          "come again", "didn't catch", "didnt catch"))):
         return "repeat"
     if t in ("voice mode", "voice"):
         return "voice"
@@ -205,11 +241,16 @@ class BuildEngine:
         self.mode_chosen = mode in ("voice", "visual")
         self.verifier_available = verifier_available
         self.uploader_available = uploader_available
+        self.continuous_monitoring = False
         self.check_wires = check_wires
         self.clock = clock
         self.orientation = Orientation()
         self._resume: dict | None = None
+        self.programmed = False                       # True only after a successful upload
+        self.turns: list[tuple[str, str]] = []      # ("Builder"|"Pinpoint", text), most recent last
+        self.utter_seq = 0                            # bumps on every real utterance; answers to older ones are dropped
         self._praise = _Rotate("Perfect.", "Nice, that's right.", "Spot on.", "Looks great.", "Yep, that's it.")
+        self._thinking = _Rotate("Good question, one second.", "Let me think.", "Okay, one moment.")
         self._looking = _Rotate("Let me have a look.", "Okay, let me check.", "Let me see.")
         self._still = _Rotate("Still working on it. I'm double-checking every connection so it's safe.",
                               "Almost there, just making sure the wiring is safe.")
@@ -229,6 +270,8 @@ class BuildEngine:
         self._last_tick_say = clock()
         self._pending = False
         self._review_rounds = 0
+        self._unclear = 0                     # unclear photos in a row for the current check
+        self._touch_check: str | None = None  # "step" | "review": waiting for yes/no to a check-by-touch
         self._plan_token = 0
         self._setup_tries = 0
         self._upload_tries = 0
@@ -243,6 +286,8 @@ class BuildEngine:
         return self.plan.steps[self.step_idx]
 
     def _say(self, text: str, kind: str = "info", remember: bool = True, key: str | None = None) -> Say:
+        self.turns.append(("Pinpoint", text))
+        del self.turns[:-16]
         self.caption = text
         if remember:
             self._last_instruction = text
@@ -318,20 +363,17 @@ class BuildEngine:
             return lead + self._begin_build()
         if phase in ("find", "place", "checking"):
             return lead + self._enter_step()
-        if phase == "review":
-            return lead + self._enter_review()
-        if phase == "upload":
-            return lead + self._enter_upload()
-        return lead + self._enter_test()
+        # Wiring "done" in the last call isn't proof: look at the board again before programming or testing.
+        return lead + self._enter_review()
 
     def start(self) -> list[Action]:
         if self._resume is not None:
             self._enter(Phase.RESUME)
             return [self._say(self._resume_offer_text())]
         self._enter(Phase.INTAKE)
-        text = "Hi! I'm Pinpoint. What would you like to build today? Describe it however you like."
+        text = "Hi, I'm Pinpoint. What are we building? Say 'a fan' for a quick demo."
         if not self.mode_chosen:
-            text += " And if you'd rather have captions than my voice, just show me a thumbs-up."
+            text += " Thumbs-up turns on captions."
         return [self._say(text)]
 
     def on_gesture(self, g: str) -> list[Action]:
@@ -348,11 +390,20 @@ class BuildEngine:
         t = _norm(text)
         if not t or _cut_off(text):
             return []                      # trailed off: wait for the rest
+        self.utter_seq += 1
+        self.turns.append(("Builder", text.strip()))
+        del self.turns[:-16]
         cmd = _command(t)
         if cmd == "stop":
             return []                      # the session already cut the speech; just listen
         if cmd == "repeat":
             return [Say(self._last_instruction or self.caption, "urgent")]
+        if self.phase == Phase.SETUP and self._setup_tries and t in {
+            "continue", "continue anyway", "trust me", "already correct", "it is correct",
+        }:
+            self._log("setup", "Builder confirmed the requested layout")
+            return [self._say("Okay, I'll trust your setup and use the standard layout.", remember=False)] \
+                + self._enter_step()
         if cmd in ("voice", "visual"):
             self.mode, self.mode_chosen = cmd, True
             self._log("mode", f"{cmd} mode")
@@ -382,12 +433,29 @@ class BuildEngine:
                 return self._restore()
             return [self._say("Sorry, I didn't catch that. Say carry on to continue your build, or fresh start "
                               "for a new one.")]
+        if self._touch_check and cmd is None:
+            out = self._on_touch_answer(t)
+            if out is not None:
+                return out
+        if self.phase == Phase.TEST and self.plan is not None and self.plan.test.type == "ask" and cmd is None:
+            if _affirmative(t) or any(w in f" {t} " for w in (" spinning", " it works", " working", " spins",
+                                                               " it's going", " it moves")):
+                if not _negative(t):
+                    self._log("test", "Builder confirmed it works")
+                    return [self._say("It works! You built that yourself. Brilliant job!", "urgent")] \
+                        + self._finish(True)
+            if _negative(t):
+                self._log("test", "Builder says it doesn't work yet")
+                return [self._say("Let's sort it out. Is the green light on the power module lit? If not, press its "
+                                  "button and check the cable is pushed in. If it is lit, check the red wire is in "
+                                  "the plus rail and the black wire in the minus rail. Tell me when you've checked.")]
         if self.phase == Phase.INTAKE:
             if _negative(t):
                 return []                  # "no, don't do that": not a build request; keep listening
-            if ((_is_ready(t) or cmd) and len(t.split()) <= 2) or len(t.split()) < 3:
-                return [self._say("What would you like to build? For example, a light that turns on when it "
-                                  "gets dark. Say 'ideas' to hear more.")]
+            if not cmd and library.confident_match(text) is not None:
+                return self._request_plan(text)   # "a fan", "traffic light": short, but clearly a project
+            if ((_is_ready(t) or cmd) and len(t.split()) <= 2) or len(t.split()) < 3 or _vague(t):
+                return [self._say("What would you like to build? Say 'ideas' for examples.")]
             return self._request_plan(text)
         if self.phase == Phase.PLANNING:
             if _negative(t):
@@ -409,14 +477,13 @@ class BuildEngine:
             first = t.split()[0]
             if is_question(text) and first not in ("can", "could", "would", "will") and self.plan is not None:
                 # "what does it do?" / "how long will it take?": answer from the plan, no photo needed
-                return [self._say(f"{self.plan.summary} It uses {self._parts_sentence(self.plan)}, in "
-                                  f"{_NUM.get(len(self.plan.steps), len(self.plan.steps))} steps. "
-                                  "Say yes to start building, or tell me what to change.")]
+                return [self._say(f"{self.plan.summary} You'll need {self._parts_sentence(self.plan)}. "
+                                  f"{_NUM.get(len(self.plan.steps), len(self.plan.steps))} steps. Say yes, or tell me what to change.")]
             if change or len(t.split()) >= 6:
                 return self._request_plan(text, previous=self.plan)
             # short and unclear (often misheard): ask, don't guess, and don't spend a planning call
-            return [self._say(f"Sorry, I heard \"{text.strip()}\". Say yes to build the {self.plan.title}, "
-                              "no for something else, or tell me what to change.")]
+            return [self._say(f"Sorry, I didn't quite catch that. Do you want to build the {self.plan.title}? "
+                              "Say yes or no, or tell me what you'd change.")]
 
         if cmd == "help":
             return self._help()
@@ -429,32 +496,35 @@ class BuildEngine:
             local = self._answer_from_plan(t)
             if local is not None:              # "where does the other end go?": the plan knows; no photo
                 return [self._say(local, remember=False)]
-            if not self.verifier_available:
-                return [self._say("I can't look right now. Say repeat to hear the instruction again.")]
-            return [RequestAnswer(text, self._context())]
+            if self.verifier_available and _needs_eyes(t):
+                return [RequestAnswer(text, self._context())]
+            return self._reply(text)
         if not _is_ready(t):
             # Never ignore the builder silently: say what was heard and what Pinpoint is waiting for.
             self._log("comment", text)
-            waiting = {Phase.FIND: "say ready when you have the part",
-                       Phase.PLACE: "say done when it's in",
-                       Phase.CHECKING: "I'm checking the photo",
-                       Phase.SETUP: "say ready when the board is set up",
-                       Phase.REVIEW: "say done when it's fixed",
-                       Phase.UPLOAD: "say ready when the USB cable is in",
-                       Phase.TEST: "say skip if you want to finish"}.get(self.phase, "say repeat to hear the step")
-            return [self._say(f"I heard \"{text.strip()}\". {waiting[0].upper() + waiting[1:]}, ask me a question, "
-                              "or say help.", remember=False)]
+            if len(t.split()) < 3:
+                return []                      # a stray word or two (often background talk): just keep listening
+            if self.verifier_available and _needs_eyes(t):   # "take a look at the circuit": photo, not text
+                return [RequestAnswer(text, self._context())]
+            local = self._answer_from_plan(t)
+            if local is not None:
+                return [self._say(local, remember=False)]
+            return self._reply(text)
         return self._on_ready()
 
     def on_tick(self, now: float | None = None) -> list[Action]:
         now = self.clock() if now is None else now
-        if self.phase == Phase.PLANNING and now - self._last_tick_say >= 15.0:
+        if self.phase == Phase.PLANNING and now - self._last_tick_say >= 8.0:
             self._last_tick_say = now
             return [self._say(self._still(), remember=False)]
-        if self.phase == Phase.UPLOAD and self._pending and now - self._last_tick_say >= 15.0:
+        if self.phase == Phase.CHECKING and self._pending and now - self._last_tick_say >= 8.0:
+            self._last_tick_say = now
+            return [self._say("I'm still checking the photo.", remember=False)]
+        if self.phase == Phase.UPLOAD and self._pending and now - self._last_tick_say >= 8.0:
             self._last_tick_say = now
             return [self._say("Still programming the Arduino.", remember=False)]
-        if self.phase == Phase.TEST and not self._test_warned and now - self._phase_t >= 25.0:
+        if self.phase == Phase.TEST and not self._test_warned and now - self._phase_t >= 25.0 \
+                and self.plan is not None and self.plan.test.type == "serial":
             self._test_warned = True
             return [self._say("I'm not getting readings yet. Check the USB cable is pushed all the way into the "
                               "Arduino. Say skip if you want to finish without the test.")]
@@ -474,11 +544,8 @@ class BuildEngine:
         parts = self._parts_sentence(res.plan)
         n = len(res.plan.steps)
         self._enter(Phase.CONFIRM)
-        lead = res.message.strip()
-        if lead and not lead.endswith("."):
-            lead += "."
-        text = (f"{lead} You'll need {parts}, and it's {_NUM.get(n, n)} steps. "
-                "Want to build it? Just say yes, or tell me what you'd change.")
+        text = (f"Let's build {res.plan.title}: {res.plan.summary} You'll need {parts}. "
+                f"{_NUM.get(n, n)} steps. Say yes, or tell me what to change.")
         return [self._say(text)]
 
     def on_setup_result(self, res: BoardSetup) -> list[Action]:
@@ -488,8 +555,7 @@ class BuildEngine:
         self._setup_tries += 1
         last_try = self._setup_tries >= 3
         if res.board_visible is False and not last_try:
-            return [self._say("Hmm, I can't see the breadboard. Is the back camera on? In FaceTime, tap the screen, "
-                              "then the flip-camera button. Then hold the phone over the board and tell me when.",
+            return [self._say("I can't see the breadboard. Switch to the back camera, hold it over the board, and say ready.",
                               "urgent")]
         if res.near_half:
             self.orientation.near_half = res.near_half
@@ -498,21 +564,25 @@ class BuildEngine:
         if res.near_outer_rail:
             self.orientation.near_outer_rail = res.near_outer_rail
         layout_ok = res.usb_left
+        if layout_ok is None and res.board_visible is True:
+            self._log("setup", "Board visible; orientation unclear, using the requested standard layout")
+            return [self._say("I can see the board, but can't reliably judge its direction. I'll use the layout "
+                              "I asked you to set: centered boards with their edges touching, row 1 left, USB "
+                              "pointing left.", remember=False)] \
+                + self._enter_step()
         if layout_ok is True:
             self._log("setup", res.description or "board already set up right")
             row = f" Row 1 is on your {self.orientation.row1}." if res.row1_end else ""
-            return [self._say(f"Perfect, your breadboard and Arduino are already set up just right.{row} "
-                              "You can put the phone down. Let's start!", "urgent", remember=False)] + self._enter_step()
+            return [self._say(f"Setup looks good.{row} Put the phone down.", "urgent", remember=False)] + self._enter_step()
         if layout_ok is False and not last_try:
-            fix = res.fix or ("Let's turn things round. The breadboard's long side goes along your edge of the "
-                              "table, and the Arduino sits just beyond it, with its USB socket pointing to your left.")
-            return [self._say(f"{fix} Tell me when that's done and I'll look again.", "urgent")]
+            fix = res.fix or ("Put the breadboard's long edge toward you. Place the Arduino beyond it, USB pointing left.")
+            return [self._say(f"{fix} Say ready after changing it. If it's already set up that way, say "
+                              "'continue' and I'll trust you.", "urgent")]
         if self._setup_tries < 2:
-            return [self._say("I couldn't quite make it out. Hold the phone a little lower and keep it still, "
-                              "then tell me when.", "urgent")]
+            return [self._say("Couldn't see it. Hold the phone lower and steady, then say ready.", "urgent")]
         self._log("setup", "Setup photo unclear; using the standard layout")
-        return [self._say("Let's go with the standard layout: the Arduino just beyond the breadboard, USB socket "
-                          "on your left, and row 1 at your left end.", remember=False)] + self._enter_step()
+        return [self._say("Using standard layout: Arduino beyond the board, USB left, row 1 at your left.",
+                          remember=False)] + self._enter_step()
 
     def on_identify_result(self, res: ModuleID) -> list[Action]:
         self._pending = False
@@ -524,10 +594,10 @@ class BuildEngine:
         if res.module == want or res.module == "unknown":
             if res.module == "unknown":
                 self._log("note", f"Couldn't confirm {self._part_name(s.ref)} by camera")
-            return self._enter_place(confirmed=res.module == want)
+            return self._enter_place()
         self._log("mistake", f"Picked up the {self.kit.parts[res.module].name} instead of the {self._part_name(s.ref)}")
-        return [self._say(f"That's the {self.kit.parts[res.module].name}, not the {self._part_name(s.ref)}. "
-                          f"Put it aside and find the {self._part_name(s.ref)}, then say ready.", "urgent")]
+        return [self._say(f"That's a {self.kit.parts[res.module].name}. Find the {self._part_name(s.ref)} instead; say ready.",
+                          "urgent")]
 
     def on_placement_result(self, res: PlacementCheck) -> list[Action]:
         self._pending = False
@@ -540,9 +610,22 @@ class BuildEngine:
             fix = res.problem or "Something isn't in the right hole yet."
             return [self._say(f"Almost! {fix} Tell me when you've fixed it.", "urgent")]
         if res.ok is None:
-            self._log("note", f"{self._part_name(s.ref)} not visually confirmed")
-            return [self._say("I couldn't quite see it, so I'll trust you, and we'll check everything at the end.")] \
-                + self._advance()
+            if self.continuous_monitoring:
+                self._enter(Phase.PLACE)
+                return [self._say("I can't see that placement clearly yet. Keep the video pointed at the circuit; "
+                                  "I'll check again.", remember=False)]
+            self._unclear += 1
+            if self._unclear < 2 and self.verifier_available:
+                # Try again before giving up, with exact aiming help.
+                self._pending = True
+                spot = self._aim_hint(s)
+                return [self._say(f"I couldn't see it clearly. {spot} Hold still.", remember=False),
+                        RequestPlacementCheck(self.step_idx, self._expected(s), self._already(), self._targets(s))]
+            # Still unclear: find out from the builder, by touch, instead of skipping the check.
+            self._log("note", f"{self._part_name(s.ref)} checked by touch (photo unclear)")
+            self._touch_check = "step"
+            return [self._say(f"I still can't see it clearly, so let's check by touch. {self._where(s)} "
+                              "Is it like that? Say yes or no.")]
         self._log("placed", f"{self._part_name(s.ref)} placed correctly")
         return [self._say(self._praise(), remember=False)] + self._advance()
 
@@ -550,18 +633,46 @@ class BuildEngine:
         self._pending = False
         if self.phase != Phase.REVIEW:
             return []
+        if res.ok is None and self.continuous_monitoring:
+            self._enter(Phase.REVIEW)
+            return [self._say("I can't see the whole circuit clearly yet. Keep the video pointed at the board; "
+                              "I'll check again.", remember=False)]
         self._review_rounds += 1
         if res.ok is False and res.problems and self._review_rounds <= 2:
             for p in res.problems:
                 self._log("mistake", f"Final check: {p} (caught)")
-            first = res.problems[0]
+            first = brief(res.problems[0])
             more = f" There {'is' if len(res.problems) == 2 else 'are'} {len(res.problems) - 1} more thing{'s' if len(res.problems) > 2 else ''} after that." \
                 if len(res.problems) > 1 else ""
             return [self._say(f"One thing to fix before we power it up. {first}{more} Tell me when it's fixed "
                               "and I'll look again.", "urgent")]
-        self._log("review", "Final check passed" if res.ok else "Final check skipped or unclear")
-        return [self._say("The wiring looks great." if res.ok else "Okay, I'll trust your wiring.", remember=False)] \
-            + self._enter_upload()
+        if res.ok is None and self._review_rounds <= 2:
+            self._pending = True
+            return [self._say("I couldn't see the board in that photo. Hold the phone above the breadboard and "
+                              "the Arduino so both are in view, and keep it still.", "urgent", remember=False),
+                    RequestReview(self._expected_all())]
+        if res.ok is None and self.plan is not None:
+            # Still can't see it: go through the connections with the builder instead of skipping the check.
+            self._log("review", "Final check by touch (photos unclear)")
+            self._touch_check = "review"
+            checklist = "; ".join(self._short(x) for x in self.plan.steps)
+            return [self._say("I can't see the whole board clearly, so let's check it by touch. " + checklist +
+                              ". Is everything like that? Say yes or no.")]
+        self._log("review", "Final check passed" if res.ok else "Final check finished")
+        return [self._say("The wiring looks great.", remember=False)] + self._enter_upload()
+
+    def _short(self, s) -> str:
+        """One connection, spoken briefly: "the red LED with anode in row 10, cathode in row 11"."""
+        def spot(ep):
+            h = parse_hole(ep)
+            if h:
+                return f"row {h[1]}"
+            return {"RAIL:N+": "the plus rail", "RAIL:N-": "the minus rail"}.get(ep, ep.replace("UNO:", "pin "))
+        if s.kind == "wire":
+            return f"a wire from {spot(s.connections[0].to)} to {spot(s.connections[1].to)}"
+        pt = self.kit.parts[self.plan.part_of(s.ref)]
+        legs = ", ".join(f"{c.lead} in {spot(c.to)}" for c in s.connections)
+        return f"the {pt.name} with {legs}"
 
     def on_upload_result(self, res: UploadResult) -> list[Action]:
         self._pending = False
@@ -569,17 +680,27 @@ class BuildEngine:
             return []
         self._upload_tries += 1
         if res.ok:
+            self.programmed = True
             self._log("upload", "Code uploaded")
             return self._enter_test()
         self._log("upload", f"{res.stage} failed")
+        if res.stage == "board":
+            # Wrong board: nothing will work until it's swapped, so never pretend otherwise.
+            return [self._say(res.message + " Or say skip to finish without programming it.")]
         if res.stage == "setup" or self._upload_tries >= 3:
-            return [self._say(res.message + " Let's test it by hand instead.")] + self._enter_test(manual=True)
+            self._enter(Phase.TEST)
+            self._test_seen, self._test_warned = [], True
+            self.show = "Not programmed"
+            return [self._say(res.message + " So it isn't programmed yet, and it won't work until the code is "
+                              "uploaded from the laptop. Say skip to finish, or say back to check the wiring.")]
         return [self._say(res.message)]
 
-    def on_answer(self, answer: str | None) -> list[Action]:
+    def on_answer(self, answer: str | None, seq: int = 0) -> list[Action]:
+        if seq and seq != self.utter_seq:
+            return []                          # they've said something since: this answer is stale
         if not answer:
             return [self._say("Sorry, I couldn't work that out from the photo. Try asking again.", remember=False)]
-        return [self._say(answer, remember=False)]
+        return [self._say(brief(answer), remember=False)]
 
     def on_serial(self, receiving: bool, values: list[int]) -> list[Action]:
         if self.phase != Phase.TEST or self.plan is None:
@@ -603,8 +724,7 @@ class BuildEngine:
         self._enter(Phase.PLANNING)
         self._pending = True
         self._plan_token += 1
-        lead = ("Ooh, nice idea. Give me a moment to design that with the parts in your kit." if previous is None
-                else "Sure, let me rework the design.")
+        lead = "Designing your circuit." if previous is None else "Updating the design."
         return [self._say(lead, remember=False),
                 RequestPlan(text, previous, self._plan_token)]
 
@@ -614,20 +734,30 @@ class BuildEngine:
             name = self.kit.parts[p.part].name if p.part in self.kit.parts else p.part
             counts[name] = counts.get(name, 0) + 1
         items = [f"{'a' if n == 1 else _NUM.get(n, n)} {name}{'' if n == 1 else 's'}" for name, n in counts.items()]
-        items.append("some jumper wires")
+        if any(s.kind == "wire" for s in plan.steps):
+            items.append("some jumper wires")
+        if len(items) == 1:
+            return items[0]
         return ", ".join(items[:-1]) + " and " + items[-1]
 
     def _begin_build(self) -> list[Action]:
         self._enter(Phase.SETUP)
         self.step_idx = 0
         self._setup_tries = 0
+        if self.plan is not None and not self.plan.uses_arduino:
+            # Only the breadboard and the power module: nothing to line up, nothing to photograph.
+            self._log("setup", "No Arduino in this build")
+            return [self._say("Great! This one doesn't need the Arduino at all, just the breadboard and the power "
+                              "module. Put the breadboard flat in front of you, long side toward you.",
+                              remember=False)] + self._enter_step()
         if self.verifier_available:
             # Look first: if the board is already set up right, there's nothing to explain.
             self._pending = True
             return [self._say("Great! First, let me take a quick look at how your board is set up.", remember=False),
                     RequestSetupCheck()]
-        text = ("Let's set up. Put the breadboard flat in front of you, long side toward you. Put the Arduino just "
-                "beyond it, with its USB socket pointing to your left. Leave the USB cable unplugged for now.")
+        text = ("Let's set up. Put the breadboard flat in front of you, long side toward you. Put the Arduino beyond "
+                "it, centered with their long edges parallel and touching, USB pointing to your left. Leave the USB "
+                "cable unplugged for now.")
         if self.verifier_available:
             text += (" Then pick up the phone and hold it flat above the breadboard, top edge pointing away from "
                      "you, and say ready.")
@@ -650,7 +780,7 @@ class BuildEngine:
                 self._pending = True
                 cands = {k: v.name for k, v in self.kit.parts.items() if v.resistor}
                 return [RequestPartID(cands, pid)]
-            return self._enter_place(confirmed=False)
+            return self._enter_place()
         if self.phase == Phase.PLACE:
             s = self.step
             if self.verifier_available and (s.kind == "place" or self.check_wires):
@@ -667,11 +797,45 @@ class BuildEngine:
             self._pending = True
             return [self._say("Programming your Arduino now. It takes about twenty seconds.", remember=False),
                     RequestUpload(self.plan)]
+        if self.phase == Phase.TEST and self.plan and self.plan.test.type == "ask":
+            return [self._say("Is it working? Say yes or no.")]   # "done" = they've switched it on: ask
         if self.phase == Phase.TEST and self.plan and self.plan.test.type != "serial":
             return self._finish(True)
         return []
 
+    def _aim_hint(self, s) -> str:
+        """Where to hold the phone for a close-up of this step."""
+        rows = sorted({parse_hole(c.to)[1] for c in s.connections if parse_hole(c.to)})
+        if rows:
+            span = f"row {rows[0]}" if len(rows) == 1 else f"rows {rows[0]} to {rows[-1]}"
+            return f"Hold the phone a hand's width above {span}, counting from the {self.orientation.row1} end."
+        if any(c.to.startswith("RAIL:") for c in s.connections):
+            return "Hold the phone a hand's width above the edge of the breadboard nearest you."
+        return "Hold the phone a hand's width above the part you just placed."
+
+    def _on_touch_answer(self, t: str) -> list[Action] | None:
+        """The builder's yes/no to "let's check by touch"."""
+        kind = self._touch_check
+        if _affirmative(t) and not _negative(t):
+            self._touch_check = None
+            self._unclear = 0
+            if kind == "step":
+                self._log("placed", f"{self._part_name(self.step.ref)} confirmed by touch")
+                return [self._say(self._praise(), remember=False)] + self._advance()
+            self._log("review", "Final check confirmed by touch")
+            return [self._say("Great, everything's in place.", remember=False)] + self._enter_upload()
+        if _negative(t):
+            self._touch_check = None
+            self._unclear = 0
+            if kind == "step":
+                self._enter(Phase.PLACE)
+                return [self._say(f"No problem, let's fix it. {self._where(self.step)} Tell me when it's in.")]
+            return [self._say("No problem. Tell me which part isn't right, or say back to go through the steps "
+                              "again.")]
+        return None
+
     def _enter_step(self) -> list[Action]:
+        self._unclear, self._touch_check = 0, None
         s = self.step
         if s is None:
             return self._enter_review()
@@ -690,35 +854,35 @@ class BuildEngine:
             self._enter(Phase.PLACE)
             a, b = s.connections[0].to, s.connections[1].to
             self.show = f"Wire: {self._ep_short(a)} -> {self._ep_short(b)}"
-            why = _sentence(s.why, "This wire")
-            text = (f"{prefix}Grab a jumper wire. {why + ' ' if why else ''}One end goes into {self._ep(a)}. "
-                    f"The other end goes into {self._ep(b)}. Tell me when it's in.")
+            text = (f"{prefix}Jumper wire: connect one end to {self._ep(a)} and the other to {self._ep(b)}. "
+                    "Say done.")
             if self.mode == "visual":
                 text = f"{prefix}Jumper wire: {self._ep_short(a)} to {self._ep_short(b)}. Thumbs-up when done."
             return [self._say(text)]
         pt = self.kit.parts[self.plan.part_of(s.ref)]
         self._enter(Phase.FIND)
         self.show = f"Find: {pt.name}"
-        text = f"{prefix}Find the {pt.name}. It's {pt.touch}. Tell me when you've got it."
+        text = f"{prefix}Find the {pt.name}: {pt.touch}. Say ready."
         if self.mode == "visual":
             text = f"{prefix}Find the {pt.name}. Thumbs-up when you have it."
         return [self._say(text)]
 
-    def _enter_place(self, confirmed: bool) -> list[Action]:
+    def _enter_place(self) -> list[Action]:
         s = self.step
         pt = self.kit.parts[self.plan.part_of(s.ref)]
         self._enter(Phase.PLACE)
         self.show = f"{pt.name}: " + ", ".join(f"{c.lead} -> {self._ep_short(c.to)}" for c in s.connections)
-        lead = f"Yep, that's the {pt.name}. " if confirmed else ""
         if self.mode == "visual":
-            return [self._say(f"{lead}{self.show}. Thumbs-up when done.")]
+            return [self._say(f"{self.show}. Thumbs-up when done.")]
+        if pt.mount:
+            return [self._say(f"{pt.mount} Say done.")]
         parts = []
         if pt.layout == "wires":
-            parts.append("Use a jumper wire with a socket on one end for each pin.")
+            parts.append("Use one socket-ended jumper per pin.")
         elif pt.layout == "inline":
-            parts.append("Its legs go into neighbouring rows, one leg per row.")
+            parts.append("Put each leg in a neighboring row.")
         elif pt.layout == "straddle":
-            parts.append("It sits across the groove, with two legs on each side.")
+            parts.append("Place it across the groove.")
         verb = "Connect" if pt.layout == "wires" else "Put"
         for c in s.connections:
             desc = pt.leads.get(c.lead, c.lead)
@@ -729,14 +893,16 @@ class BuildEngine:
                 desc += f", labelled {c.lead}"
             into = "to" if verb == "Connect" else "into"
             parts.append(f"{verb} {desc} {into} {self._ep(c.to)}.")
-        why = _sentence(s.why, "It")
-        return [self._say(f"{lead}{why + ' ' if why else ''}" + " ".join(parts) + " Tell me when it's in.")]
+        return [self._say(" ".join(parts) + " Say done.")]
 
     def _advance(self) -> list[Action]:
         self.step_idx += 1
         return self._enter_step()
 
     def _enter_review(self) -> list[Action]:
+        if self.plan is not None and not self.plan.uses_arduino:
+            self.targets = []
+            return [self._say("That's all the wiring, nice work!", remember=False)] + self._enter_test()
         self._enter(Phase.REVIEW)
         self.targets = []
         self.show = "Final check"
@@ -744,8 +910,7 @@ class BuildEngine:
             return self._enter_upload()
         self._review_rounds = 0
         self._pending = True
-        return [self._say("That's all the wiring, nice work! Before we power it up, let me take one look at the "
-                          "whole thing.", remember=False),
+        return [self._say("Final photo check before power-up.", remember=False),
                 RequestReview(self._expected_all())]
 
     def _enter_upload(self) -> list[Action]:
@@ -753,10 +918,8 @@ class BuildEngine:
         self.show = "Plug in USB"
         self._upload_tries = 0
         if not self.uploader_available:
-            return [self._say("Now plug the USB cable into the Arduino and the laptop. The code needs to be "
-                              "uploaded from the laptop.")] + self._enter_test(manual=True)
-        return [self._say("Now plug the USB cable into the Arduino, and the other end into the laptop. "
-                          "Tell me when it's in, and I'll program it for you.")]
+            return [self._say("Plug the Arduino into the laptop by USB.")] + self._enter_test(manual=True)
+        return [self._say("Connect the Arduino to the laptop by USB, then say ready to upload.")]
 
     def _enter_test(self, manual: bool = False) -> list[Action]:
         self._enter(Phase.TEST)
@@ -783,6 +946,112 @@ class BuildEngine:
                               "metal USB socket.")]
         return [Say(self._last_instruction or self.caption, "urgent")]
 
+    def _reply(self, text: str) -> list[Action]:
+        """A real answer to whatever the builder said, from the plan and the current step (no photo)."""
+        if not self.verifier_available:
+            s = self.step
+            return [self._say(self._where(s) if s is not None else "Say help, or say back to go to the last step.",
+                              remember=False)]
+        # Acknowledge questions straight away; statements may be background talk, so wait for the router.
+        ack = [self._say(self._thinking(), remember=False)] if is_question(text) or "?" in text else []
+        return ack + [RequestReply(text, self._route_state(), list(self.turns[:-1]), self.utter_seq)]
+
+    def expects_answer(self, text: str) -> bool:
+        """Is this a direct answer to the question Pinpoint just asked? (Never filtered out as echo.)"""
+        t = _norm(text)
+        if self.phase == Phase.RESUME:
+            return any(w in f" {t} " for w in (" fresh", " new ", " carry on", " continue", " start "))
+        if self.phase in (Phase.CONFIRM, Phase.INTAKE):
+            return _affirmative(t) or _negative(t)
+        return _is_ready(t)
+
+    def _route_state(self) -> str:
+        """Everything the router needs: the plan, which steps are done, where Pinpoint thinks we are."""
+        if self.plan is None:
+            return "No build chosen yet."
+        n = len(self.plan.steps)
+        lines = [f"Build: {self.plan.title}. {self.plan.summary}",
+                 {Phase.SETUP: "Pinpoint is checking how the board is set up.",
+                  Phase.FIND: f"Pinpoint is on step {self.step_idx + 1}: waiting for them to find the part.",
+                  Phase.PLACE: f"Pinpoint is on step {self.step_idx + 1}: waiting for them to place it and say done.",
+                  Phase.CHECKING: f"Pinpoint is checking a photo of step {self.step_idx + 1}.",
+                  Phase.REVIEW: "Pinpoint believes all wiring steps are done and is doing the final photo check.",
+                  Phase.UPLOAD: "Pinpoint believes all wiring is done and is waiting for the USB cable to program it.",
+                  Phase.TEST: "Pinpoint is at the test stage, waiting for them to try the finished build.",
+                  }.get(self.phase, f"Phase: {self.phase.value}."),
+                 "Steps (done = Pinpoint thinks it's done; the builder may say otherwise):"]
+        for i, s in enumerate(self.plan.steps):
+            mark = ("done" if i < self.step_idx or self.phase in (Phase.REVIEW, Phase.UPLOAD, Phase.TEST)
+                    else "CURRENT" if i == self.step_idx else "to do")
+            lines.append(f"  {i + 1}. [{mark}] {self._describe(s)[2:]}")
+        s = self.step
+        if s is not None:
+            lines.append("Touch directions for the current step: " + self._where(s))
+        if not self.plan.uses_arduino:
+            lines.append("This build has no Arduino and no code: the power module powers it. At the end the "
+                         "builder plugs in the power module's cable, presses its button, and says if it works.")
+        else:
+            lines.append("Programmed: yes, the code is on the Arduino." if self.programmed else
+                         "Programmed: NO. The code has not been uploaded successfully, so nothing will work yet.")
+        lines.append(f"The Arduino is beyond the breadboard with its USB socket on the builder's left. "
+                     f"There are {n} steps; after them: final photo check, plug in USB, Pinpoint programs it, test.")
+        return "\n".join(lines)
+
+    def on_route(self, res: dict | None, seq: int, text: str = "") -> list[Action]:
+        """Apply what the router decided. Answers to an utterance the builder has since followed up on are dropped."""
+        if seq and seq != self.utter_seq:
+            return []
+        if res is None:
+            return [self._say("Sorry, I didn't catch that properly. Could you say it again?", remember=False)]
+        action, say = res.get("action", "answer"), brief((res.get("say") or "").strip())
+        lead = [self._say(say, remember=False)] if say else []
+        if action == "ignore":
+            return []
+        if action == "go_to_step" and self.plan is not None:
+            n = int(res.get("step") or 0)
+            if 1 <= n <= len(self.plan.steps):
+                self._pending = False
+                self.step_idx = n - 1
+                self._log("route", f"Moved to step {n} ({text})")
+                return lead + self._enter_step()
+        if action == "next":
+            if self.phase in (Phase.REVIEW, Phase.UPLOAD, Phase.TEST, Phase.SETUP, Phase.FIND, Phase.PLACE):
+                self._pending = False
+                return lead + self._on_ready()
+        if action == "back":
+            return lead + self._back()
+        if action == "program" and self.plan is not None:
+            if not self.uploader_available:
+                return lead + [self._say("I can't program the Arduino from this laptop, so the code has to be "
+                                         "uploaded by hand.", remember=False)]
+            self._pending = False
+            self._enter(Phase.UPLOAD)
+            self._upload_tries = 0
+            self._log("route", f"Programming on request ({text})")
+            return lead + self._on_ready()
+        if action == "look" and self.verifier_available:
+            return lead + [RequestAnswer(text or "Is this right?", self._context())]
+        if action == "restart":
+            self.plan, self.step_idx, self._resume = None, 0, None
+            self._enter(Phase.INTAKE)
+            return lead + [self._say("What would you like to build instead?")]
+        return lead
+
+    def _reply_context(self) -> str:
+        parts = [self._context()]
+        s = self.step
+        if s is not None and self.phase in (Phase.FIND, Phase.PLACE, Phase.CHECKING):
+            parts.append("Exact directions for this step: " + self._where(s))
+        waiting = {Phase.SETUP: "a setup photo", Phase.FIND: "them to find the part and say ready",
+                   Phase.PLACE: "them to place it and say done", Phase.CHECKING: "a photo check",
+                   Phase.REVIEW: "the final photo check", Phase.UPLOAD: "the USB cable to be plugged in (then 'ready')",
+                   Phase.TEST: "them to try the finished build"}.get(self.phase)
+        if waiting:
+            parts.append(f"Pinpoint is waiting for {waiting}.")
+        if self.plan is not None and self.phase in (Phase.REVIEW, Phase.UPLOAD, Phase.TEST):
+            parts.append("Full wiring: " + "; ".join(self._describe(x)[2:] for x in self.plan.steps))
+        return " ".join(parts)
+
     def _answer_from_plan(self, t: str) -> str | None:
         """Answer "where / which / how" questions from the plan itself. Questions that need eyes
         ("can you see it?", "is this right?") return None and go to the camera."""
@@ -798,10 +1067,16 @@ class BuildEngine:
         if " jumper" in padded and " how " in padded:
             return ("A jumper wire is a single thin wire with a metal pin at each end. Push a pin straight down "
                     "into the hole until it feels snug, about half a centimetre. " + self._where(s))
+        if " which one" in padded or " which of" in padded or " which is" in padded:
+            return None          # "which one of these is the LED?": telling parts apart, not where it goes
         if any(w in padded for w in (" where ", " which ", " what pin", " what hole", " what row", " other end",
                                      " what next", " what's next", " whats next", " what do i do", " how do i ",
-                                     " what now", " go ")) and s is not None:
-            return self._where(s)
+                                     " what now", " does it go", " do they go", " does this go")):
+            if s is not None:
+                return self._where(s)
+            if any(w in padded for w in (" usb", " cable", " laptop")) and " pin" not in padded:
+                return self._where(None)
+            return None          # e.g. "where does this yellow wire go?" after the steps: Claude, with the full wiring
         if " groove" in padded or " rail" in padded or " row" in padded:
             return ("The groove is the long channel down the middle of the breadboard. Rows run across it: count "
                     "them from the left end with a fingertip, one hole per row. The rails are the long strips "
@@ -810,16 +1085,23 @@ class BuildEngine:
 
     def _where(self, s) -> str:
         if s is None:
-            return "There's nothing left to place."
+            if self.phase in (Phase.UPLOAD, Phase.TEST):
+                return ("The USB cable's square end goes into the Arduino's USB socket, on the side pointing to "
+                        "your left. The other end goes into the laptop. If something isn't wired yet, say back.")
+            return "There's nothing left to place. Say back to go to the last wiring step."
         if s.kind == "wire":
             a, b = s.connections[0].to, s.connections[1].to
-            return f"One end of this wire goes into {self._ep(a)}. The other end goes into {self._ep(b)}."
+            return f"This wire: one end to {self._ep(a)}; the other to {self._ep(b)}."
         pt = self.kit.parts[self.plan.part_of(s.ref)]
         legs = " ".join(f"{pt.leads.get(c.lead, c.lead).capitalize()} goes into {self._ep(c.to)}."
                         for c in s.connections)
         return f"For the {pt.name}: {legs}"
 
     def _back(self) -> list[Action]:
+        if self.phase in (Phase.REVIEW, Phase.UPLOAD, Phase.TEST) and self.plan is not None:
+            self._pending = False
+            self.step_idx = len(self.plan.steps) - 1
+            return [self._say("Okay, back to the wiring.", remember=False)] + self._enter_step()
         if self.phase in (Phase.PLACE, Phase.FIND, Phase.CHECKING) and self.step_idx > 0:
             self.step_idx -= 1
             self._pending = False
@@ -830,7 +1112,7 @@ class BuildEngine:
         self._pending = False
         if self.phase == Phase.SETUP:
             self._log("setup", "Setup photo skipped")
-            return [self._say("Okay, standard layout: row 1 at your left, holes A to E on your side.",
+            return [self._say("Standard layout: row 1 left, holes A to E near.",
                               remember=False)] + self._enter_step()
         if self.phase in (Phase.PLACE, Phase.FIND, Phase.CHECKING):
             self._log("skipped", f"Skipped check of step {self.step_idx + 1}")

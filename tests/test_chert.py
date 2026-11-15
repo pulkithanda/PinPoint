@@ -52,6 +52,29 @@ def test_inbound_imessage_parse_and_signature():
     assert not c.verify_messaging_signature(raw, {"X-Webhook-Signature": f"t={old},v1={old_sig}"}, secret)
 
 
+def test_continuous_monitoring_requires_an_explicit_imessage_request():
+    assert c.continuous_monitoring_command("Please start continuous video monitoring") is True
+    assert c.continuous_monitoring_command("stop continuous monitoring") is False
+    assert c.continuous_monitoring_command("is continuous monitoring available?") is None
+    assert c.continuous_monitoring_command("is this wire in the right place?") is None
+    assert c.continuous_monitoring_command("don't start continuous monitoring") is None
+    assert c.continuous_monitoring_command("do not stop continuous monitoring") is None
+
+
+def test_board_setup_verdict_can_be_uncertain():
+    from backend.vision.verify import Verifier, _SETUP_SCHEMA
+
+    verifier = Verifier.__new__(Verifier)
+    verifier._ask = lambda *args, **kwargs: {
+        "near_half": "unsure", "row1_end": "unsure", "near_outer_rail": "unsure",
+        "board_visible": True, "layout_ok": "unsure", "fix": "", "description": "Board is visible.",
+    }
+    setup = verifier.check_board_setup(np.zeros((32, 32, 3), dtype=np.uint8))
+
+    assert _SETUP_SCHEMA["properties"]["layout_ok"]["enum"] == ["correct", "incorrect", "unsure"]
+    assert setup.usb_left is None and setup.board_visible is True
+
+
 def test_wav_to_pcm_resamples_to_48k_mono():
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:

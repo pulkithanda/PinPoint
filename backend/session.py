@@ -94,9 +94,11 @@ class Session:
         self.transcript_log: deque[str] = deque(maxlen=12)
         self.fps = 0.0
         self.finished = False
+        self._call_started: float | None = None
 
     # ------------------------------------------------------------ lifecycle
     def start(self) -> "Session":
+        self._call_started = time.monotonic()
         self.transport.start()
         self.serial.start()
         self._handle(self.engine.start())
@@ -117,6 +119,7 @@ class Session:
 
     def command(self, text: str) -> str | None:
         """Thread-safe: queue a spoken/typed/button command or a free-form question."""
+        self.transcript_log.append(f"> {text}")
         cmd = parse_command(text)
         if cmd:
             self._commands.put(("cmd", cmd))
@@ -375,6 +378,14 @@ class Session:
         return {
             **self.engine.view_state(),
             "guidance": "live" if self.live else "snapshot",
+            "call_active": self._call_started is not None and not self._stop.is_set()
+            and not getattr(self.transport, "call_ended", False),
+            "call_status": "on call" if self._call_started is not None and not self._stop.is_set()
+            and not getattr(self.transport, "call_ended", False) else
+            "ended" if self._call_started is not None else "waiting",
+            "call_elapsed_s": max(0, int(time.monotonic() - self._call_started))
+            if self._call_started is not None else 0,
+            "session_running": getattr(self, "_thread", None) is not None and self._thread.is_alive(),
             "capturing": self._capture[0].purpose if self._capture else None,
             "claude_usage": dict(getattr(self.verifier, "usage", {}) or {}),
             "fps": round(self.fps, 1),

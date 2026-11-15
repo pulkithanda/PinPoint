@@ -9,6 +9,27 @@
 projects:
 
   # ------------------------------------------------------------------ basics
+  - id: fan
+    title: Desk fan
+    difficulty: basic
+    keywords: [fan, motor, spin, spinning, wind, breeze, cool, cooling, propeller, blow, blowing, air, power supply, power module]
+    summary: A little fan that spins as soon as you switch on the power module. No Arduino and no code, just two parts.
+    parts:
+      - {ref: PS1, part: power_module}
+      - {ref: M1, part: fan_motor}
+    steps:
+      - kind: place
+        ref: PS1
+        why: The power module turns the cable's power into a steady 5 volts on the rails.
+        connections: [{lead: plus, to: "RAIL:N+"}, {lead: minus, to: "RAIL:N-"}]
+      - kind: place
+        ref: M1
+        why: The motor spins whenever power flows through it.
+        connections: [{lead: red, to: "RAIL:N+"}, {lead: black, to: "RAIL:N-"}]
+    libraries: []
+    test: {type: ask, instruction: "Plug the power cable into the power module and press its button. Can you feel the fan spinning?"}
+    sketch: ""
+
   - id: blink_led
     title: Blinking light
     difficulty: basic

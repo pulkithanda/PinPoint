@@ -1,5 +1,5 @@
 from backend.guidance.engine import Say
-from backend.guidance.speech import SpeechScheduler, tone_wav
+from backend.guidance.speech import SpeechScheduler, TTSWorker, tone_wav
 from backend.hardware.serial_monitor import FakeSerialMonitor, diagnose, parse_line
 
 
@@ -43,3 +43,16 @@ def test_serial_status():
 
 def test_tone_wav():
     assert tone_wav(800)[:4] == b"RIFF"
+
+
+def test_speech_cache_separates_voice_rates(tmp_path):
+    worker = object.__new__(TTSWorker)
+    worker.cache_dir = tmp_path
+    worker.rate_wpm = 210
+    worker._neural = type("Voice", (), {"cache_key": "en-US-AvaNeural|+20%"})()
+    fast = worker.clip_path("Say done.")
+    worker._neural.cache_key = "en-US-AvaNeural|+8%"
+    assert worker.clip_path("Say done.") != fast
+    fallback_fast = worker._fallback_path("Say done.")
+    worker.rate_wpm = 185
+    assert worker._fallback_path("Say done.") != fallback_fast

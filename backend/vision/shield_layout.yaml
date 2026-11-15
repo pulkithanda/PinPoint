@@ -1,14 +1,16 @@
-# Grove Base Shield port map, in millimetres, in the "board frame".
+# Grove Base Shield port map, in millimetres, in the "board frame". The same marker frame anchors
+# Elegoo breadboard overlays around the Arduino UNO.
 #
 # Board frame (as the builder sees the board, sitting in front of it):
 #   x grows to the RIGHT, y grows TOWARD THE BUILDER ("down").
 #   Origin = centre of marker 0.
 #
 # Markers: 4x4_50 ArUco, ids 0-3, printed from markers/aruco_4x4.pdf and taped
-# upright (text side readable from the builder's seat) on the shield corners:
+# upright (text side readable from the builder's seat) on shield/Arduino corners:
 #   0 = far-left, 1 = far-right, 2 = near-right, 3 = near-left.
 #
-# !! PLACEHOLDER COORDINATES !!  Measure on OUR shield before the demo:
+# The nominal 70 x 56 mm marker frame is also used for Elegoo hole overlays.
+# Grove port coordinates are provisional; measure on OUR shield before the demo:
 #   python -m tools.calibrate_ports        (click each port on the live top-down view)
 # `row`/`col` drive "right two ports, down one" steering, so keep them as a grid
 # even if the physical ports are not perfectly aligned.

@@ -46,6 +46,8 @@ class PartType:
     polarity: bool = False
     resistor: int | None = None
     library: str | None = None
+    source: bool = False          # supplies power itself (the breadboard power module)
+    mount: str | None = None      # one spoken instruction for parts that clip on as a whole
 
 
 @dataclass(frozen=True)
@@ -77,7 +79,8 @@ def load_kit(path: str | Path = KIT_PATH) -> Kit:
     d = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     parts = {
         pid: PartType(pid, p["name"], int(p.get("count", 1)), p["touch"], p.get("layout", "free"),
-                      dict(p["leads"]), bool(p.get("polarity", False)), p.get("resistor"), p.get("library"))
+                      dict(p["leads"]), bool(p.get("polarity", False)), p.get("resistor"), p.get("library"),
+                      bool(p.get("source", False)), " ".join((p.get("mount") or "").split()) or None)
         for pid, p in d["parts"].items()
     }
     a = d["arduino"]
@@ -135,24 +138,24 @@ class Orientation:
         # E and F touch the groove; A and J are the outermost.
         from_groove = ("EDCBA".index(col) + 1) if col <= "E" else ("FGHIJ".index(col) + 1)
         side = "your side" if near else "the far side"
-        if from_groove == 1:
-            pos = f"the hole right beside the groove, on {side}"
-        elif from_groove == 5:
-            pos = f"the outermost hole on {side}"
+        if from_groove == 5:
+            pos = f"outermost hole on {side}"
+        elif from_groove == 1:
+            pos = f"hole beside groove, on {side}"
         else:
-            pos = f"the {ordinal(from_groove)} hole from the groove, on {side}"
-        return f"row {row}, counting {row} from the {self.row1} end, {pos}"
+            pos = f"{ordinal(from_groove)} hole from groove, on {side}"
+        return f"row {row} from the {self.row1} end, {pos}"
 
     def rail_text(self, rail: str) -> str:
         sign = rail[-1]
-        edge = "nearest you" if rail.startswith("RAIL:N") else "furthest from you"
+        edge = "nearest" if rail.startswith("RAIL:N") else "furthest"
         if rail.startswith("RAIL:N"):
             outer = sign == self.near_outer_rail
         else:
             outer = sign != self.near_outer_rail
-        which = "the outer strip, right at the edge" if outer else "the inner strip, just inside the outer one"
+        which = "outer strip" if outer else "inner strip"
         name = "plus" if sign == "+" else "minus"
-        return f"the {name} rail, the long strip of holes along the edge {edge}: {which}, any hole"
+        return f"{name} rail: {which} at the {edge} edge"
 
 
 def pin_text(pin: str, kit: Kit) -> str:
@@ -164,10 +167,8 @@ def pin_text(pin: str, kit: Kit) -> str:
             if short in block:
                 idx = block.index(short) + 1
                 block_word = "left-hand" if bi == 0 else "right-hand"
-                extra = " (any GND socket works)" if short == "GND" else ""
-                return (f"pin {short.replace('3V3', '3.3 volts').replace('5V', '5 volts')} on the Arduino: "
-                        f"the socket strip along the {edge} edge, {block_word} block, "
-                        f"{ordinal(idx)} socket from the left{extra}")
+                return (f"Arduino {short.replace('3V3', '3.3 volts').replace('5V', '5 volts')}: "
+                        f"{edge} socket strip, {block_word} block, {ordinal(idx)} from left")
     return f"pin {short} on the Arduino"
 
 
@@ -273,6 +274,11 @@ class BuildPlan:
 
     def part_of(self, ref: str) -> str | None:
         return next((p.part for p in self.parts if p.ref == ref), None)
+
+    @property
+    def uses_arduino(self) -> bool:
+        """False for builds powered only by the power module (no code, nothing to program)."""
+        return any(c.to.startswith("UNO:") for s in self.steps for c in s.connections)
 
     @property
     def connection_count(self) -> int:
@@ -397,6 +403,14 @@ def validate(plan: BuildPlan, kit: Kit | None = None) -> list[str]:
 
     power_nets = {net(p) for p in POWER_PINS}
     gnd_net = net(GROUND)
+    source_plus = {net(leads["plus"]) for ref, leads in placed.items()
+                   if kit.parts[refs[ref]].source and "plus" in leads}
+    source_minus = {net(leads["minus"]) for ref, leads in placed.items()
+                    if kit.parts[refs[ref]].source and "minus" in leads}
+    if source_plus & source_minus:
+        errs.append("SHORT CIRCUIT: the power module's plus and minus are connected together")
+    if source_plus & {gnd_net} or source_minus & power_nets:
+        errs.append("the power module's output is wired against the Arduino's power")
     if gnd_net in power_nets:
         errs.append("SHORT CIRCUIT: a power pin (5V/3.3V/VIN) is wired straight to GND")
     for pin in kit.arduino_pins - POWER_PINS - {GROUND}:
@@ -405,11 +419,12 @@ def validate(plan: BuildPlan, kit: Kit | None = None) -> list[str]:
                 errs.append(f"{pin} is wired straight to power or GND; driving it would short the pin")
     for rail in ("RAIL:N+", "RAIL:N-"):
         if member_count.get(rail):
-            if not any(net(rail) == net(p) for p in kit.arduino_pins):
+            if not any(net(rail) == net(p) for p in kit.arduino_pins) and \
+                    net(rail) not in source_plus | source_minus:
                 errs.append(f"{rail} is used but never connected to the Arduino (add a wire to 5V or GND)")
     if member_count.get("RAIL:N+") and net("RAIL:N+") == gnd_net:
         errs.append("the plus rail is connected to GND")
-    if member_count.get("RAIL:N-") and net("RAIL:N-") in power_nets:
+    if member_count.get("RAIL:N-") and (net("RAIL:N-") in power_nets or net("RAIL:N-") in source_plus):
         errs.append("the minus rail is connected to power")
 
     # every lead must share its net with something else
@@ -444,6 +459,13 @@ def validate(plan: BuildPlan, kit: Kit | None = None) -> list[str]:
         if refs[ref].startswith("buzzer") and net(leads["negative"]) in power_nets:
             errs.append(f"{ref} negative leg goes to power; it must go to GND")
 
+    if not plan.uses_arduino:
+        # Powered by the module alone: no code. The test is the builder telling Pinpoint it works.
+        if plan.test.type != "ask":
+            errs.append("a build with no Arduino can't be tested over USB: use test type 'ask'")
+        if not any(kit.parts[pid].source for pid in refs.values()):
+            errs.append("nothing powers this build: add the power module or wire it to the Arduino")
+        return errs
     if not plan.sketch.strip():
         errs.append("no Arduino sketch")
     elif "Serial.begin(9600)" not in re.sub(r"\s+", "", plan.sketch):

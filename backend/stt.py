@@ -41,7 +41,9 @@ class UtteranceSegmenter:
         self._speech_s = 0.0
         self._silence_s = 0.0
         self._loud_run_s = 0.0
-        self.barge_in_s = 0.35        # this much continuous speech counts as the caller starting to talk
+        self.barge_in_s = 0.8         # this much continuous speech counts as the caller starting to talk
+        self.echo_factor = 4.0        # while Pinpoint talks, a barge-in must be this much louder than the threshold
+        self.agent_speaking = False   # set by the transport before each feed()
         self.speech_started = False   # set once per utterance when barge_in_s is reached; caller clears it
 
     def feed(self, pcm16: np.ndarray, rate: int) -> np.ndarray | None:
@@ -49,11 +51,16 @@ class UtteranceSegmenter:
         if not len(x):
             return None
         dur = len(x) / WHISPER_RATE
-        loud = float(np.sqrt(np.mean(x ** 2))) >= self.rms_threshold
+        rms = float(np.sqrt(np.mean(x ** 2)))
+        loud = rms >= self.rms_threshold
+        # While Pinpoint is talking, its own voice can leak back through the caller's phone. Leaked
+        # echo is quieter than someone speaking into the phone, so a barge-in needs clearly louder audio.
+        barge_loud = rms >= self.rms_threshold * (self.echo_factor if self.agent_speaking else 1.0)
         if loud:
             self._buf.append(x)
             self._speech_s += dur
             self._silence_s = 0.0
+        if barge_loud:
             before = self._loud_run_s
             self._loud_run_s += dur
             if before < self.barge_in_s <= self._loud_run_s:
@@ -83,7 +90,8 @@ class Transcriber:
         self._q: queue.Queue[np.ndarray] = queue.Queue()
         threading.Thread(target=self._run, name="stt", daemon=True).start()
 
-    def feed_pcm(self, pcm16: np.ndarray, rate: int) -> None:
+    def feed_pcm(self, pcm16: np.ndarray, rate: int, agent_speaking: bool = False) -> None:
+        self.segmenter.agent_speaking = agent_speaking
         utt = self.segmenter.feed(pcm16, rate)
         if self.segmenter.speech_started:
             self.segmenter.speech_started = False
