@@ -13,6 +13,7 @@ the next loop, so the call never waits on it.
 """
 from __future__ import annotations
 
+import copy
 import logging
 import queue
 import threading
@@ -32,6 +33,7 @@ from backend.guidance.speech import LocalBeeper, SpeechScheduler, TTSWorker, com
 from backend.hardware.serial_monitor import SerialMonitor
 from backend.transport import CallTransport
 from backend.vision.capture import AutoCapture, capture_prompt
+from backend.vision.crop import crop_to_hands, crop_to_shield
 from backend.vision.hands import GestureDebouncer, HandTracker, PointSmoother
 from backend.vision.shield import ShieldLayout, ShieldTracker
 from backend.vision.verify import ModuleID, PlugCheck, Verifier, claude_available
@@ -83,6 +85,7 @@ class Session:
         self._last_frame_t = 0.0
         self._last_card_t = 0.0
         self._ended_logged = False
+        self._recent: deque = deque(maxlen=12)
 
         self.latest_frame: np.ndarray | None = None
         self.latest_annotated: np.ndarray | None = None
@@ -170,6 +173,9 @@ class Session:
                 self.shield.H_board_from_img = self.shield.H_img_from_board = None
             shield_ok = self.shield.ready
         hands = self.hands.process(frame, now)
+        # Board position + hands for recent frames, so a captured photo can be cropped with the
+        # geometry of *that* frame (AutoCapture may pick one a few frames back).
+        self._recent.append((frame, self.shield.H_img_from_board, self.shield.H_board_from_img, hands))
 
         hand = None
         if hands:
@@ -256,7 +262,8 @@ class Session:
             self._fail(req)
             return
         self._say(Say("Got it. You can put the phone down.", "urgent", "photo_ok"))
-        self._pool.submit(self._run_job, req, upd.frame, upd.labeled)
+        photo = self._prepare_photo(req, upd.frame, upd.labeled)
+        self._pool.submit(self._run_job, req, photo, upd.labeled)
 
     def _fail(self, req: PhotoRequest) -> None:
         if isinstance(req, RequestIdentify):
@@ -272,22 +279,62 @@ class Session:
         if frame is None:
             self._fail(req)
             return
-        self._run_job(req, frame, self.shield.ready)
+        labeled = self.shield.ready
+        self._run_job(req, self._prepare_photo(req, frame, labeled), labeled)
 
-    def _run_job(self, req: PhotoRequest, frame: np.ndarray, labeled: bool) -> None:
+    def _frame_geometry(self, frame: np.ndarray):
+        """(shield with that frame's homography, that frame's hands), or (None, None) if unknown."""
+        try:
+            recent = list(self._recent)  # live mode calls this from a worker thread
+        except RuntimeError:
+            recent = []
+        for f, h_img, h_board, hands in reversed(recent):
+            if f is frame:
+                snap = copy.copy(self.shield)
+                snap.H_img_from_board, snap.H_board_from_img = h_img, h_board
+                return snap, hands
+        return None, None
+
+    def _prepare_photo(self, req: PhotoRequest, frame: np.ndarray, labeled: bool) -> np.ndarray:
+        """Label and crop the photo for Claude. Fewer pixels = fewer tokens; crops keep full detail."""
+        shield, hands = self._frame_geometry(frame)
+        if isinstance(req, RequestPlugCheck):
+            if labeled and shield is not None and shield.H_img_from_board is not None:
+                photo = draw_port_labels(frame, shield, highlight=req.ports)
+                ok, jpg = cv2.imencode(".jpg", photo)
+                if ok:
+                    self.snapshots.append(jpg.tobytes())  # full labelled photo for the recap
+                photo, cropped = crop_to_shield(photo, shield)
+                self._crop_log("plug", frame, photo, cropped)
+                return photo
+            ok, jpg = cv2.imencode(".jpg", frame)
+            if ok:
+                self.snapshots.append(jpg.tobytes())
+            return frame
+        if isinstance(req, RequestIdentify) and hands:
+            photo, cropped = crop_to_hands(frame, hands)
+            self._crop_log("identify", frame, photo, cropped)
+            return photo
+        return frame  # questions can be about anything in view: never crop
+
+    @staticmethod
+    def _crop_log(kind: str, frame: np.ndarray, photo: np.ndarray, cropped: bool) -> None:
+        if cropped:
+            fa, pa = frame.shape[0] * frame.shape[1], photo.shape[0] * photo.shape[1]
+            log.info("Claude %s photo cropped %dx%d -> %dx%d (%.0f%% of the area)",
+                     kind, frame.shape[1], frame.shape[0], photo.shape[1], photo.shape[0], 100 * pa / fa)
+
+    def _run_job(self, req: PhotoRequest, photo: np.ndarray, labeled: bool) -> None:
+        """`photo` is already labelled/cropped by _prepare_photo."""
         if self.verifier is None:
             self._fail(req)
             return
         if isinstance(req, RequestIdentify):
-            self._results.put(("identify", self.verifier.identify_module(frame, req.candidates)))
+            self._results.put(("identify", self.verifier.identify_module(photo, req.candidates)))
         elif isinstance(req, RequestPlugCheck):
-            photo = draw_port_labels(frame, self.shield, highlight=req.ports) if labeled else frame
-            ok, jpg = cv2.imencode(".jpg", photo)
-            if ok:
-                self.snapshots.append(jpg.tobytes())
             self._results.put(("plug", self.verifier.check_plug(photo, req.module, req.ports, labeled=labeled)))
         else:
-            self._results.put(("answer", self.verifier.answer_question(frame, req.question, req.context,
+            self._results.put(("answer", self.verifier.answer_question(photo, req.question, req.context,
                                                                       self.engine.mode)))
 
     # ------------------------------------------------------------ output
@@ -329,6 +376,7 @@ class Session:
             **self.engine.view_state(),
             "guidance": "live" if self.live else "snapshot",
             "capturing": self._capture[0].purpose if self._capture else None,
+            "claude_usage": dict(getattr(self.verifier, "usage", {}) or {}),
             "fps": round(self.fps, 1),
             "shield_ok": self.shield.ready,
             "markers": self.shield.visible_ids,

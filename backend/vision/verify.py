@@ -12,7 +12,10 @@ import base64
 import json
 import logging
 import os
+import threading
+import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -91,8 +94,38 @@ class Verifier:
         self.client = anthropic.Anthropic(timeout=timeout_s, max_retries=1)
         self.model = model
         self.effort = effort
+        self.usage = {"calls": 0, "input_tokens": 0, "output_tokens": 0}
+        self._usage_lock = threading.Lock()
+        # Every call's photo, prompt and answer, so model/effort changes can be replayed and compared later.
+        save = os.environ.get("PINPOINT_SAVE_CLAUDE_CALLS", "1").strip().lower() not in ("0", "false", "no", "off")
+        self.call_dir = (Path(__file__).resolve().parents[2] / "cache" / "claude_calls") if save else None
 
-    def _ask(self, image_b64: str, prompt: str, schema: dict | None) -> dict | str | None:
+    def _record(self, kind: str, image_b64: str, prompt: str, schema: dict | None, resp, answer) -> None:
+        u = getattr(resp, "usage", None)
+        tin = (getattr(u, "input_tokens", 0) or 0) + (getattr(u, "cache_read_input_tokens", 0) or 0) \
+            + (getattr(u, "cache_creation_input_tokens", 0) or 0)
+        tout = getattr(u, "output_tokens", 0) or 0
+        with self._usage_lock:
+            self.usage["calls"] += 1
+            self.usage["input_tokens"] += tin
+            self.usage["output_tokens"] += tout
+            total = dict(self.usage)
+        log.info("Claude %s: %d in / %d out tokens (this session: %d calls, %d in / %d out)",
+                 kind, tin, tout, total["calls"], total["input_tokens"], total["output_tokens"])
+        if self.call_dir is None:
+            return
+        try:
+            self.call_dir.mkdir(parents=True, exist_ok=True)
+            stem = self.call_dir / f"{time.strftime('%Y%m%d-%H%M%S')}-{int(time.time() * 1000) % 1000:03d}-{kind}"
+            stem.with_suffix(".jpg").write_bytes(base64.standard_b64decode(image_b64))
+            stem.with_suffix(".json").write_text(json.dumps({
+                "kind": kind, "model": self.model, "effort": self.effort, "system": _SYSTEM, "prompt": prompt,
+                "schema": schema, "answer": answer, "input_tokens": tin, "output_tokens": tout,
+            }, indent=2), encoding="utf-8")
+        except OSError as e:
+            log.warning("Could not save the Claude call record: %s", e)
+
+    def _ask(self, image_b64: str, prompt: str, schema: dict | None, kind: str = "call") -> dict | str | None:
         """One image + prompt. Returns parsed JSON if `schema` is given, else plain text."""
         a = self._anthropic
         output_config: dict = {"effort": self.effort}
@@ -125,15 +158,19 @@ class Verifier:
             return None
         if resp.stop_reason == "refusal":
             log.warning("Claude declined the verification request")
+            self._record(kind, image_b64, prompt, schema, resp, None)
             return None
         text = "".join(b.text for b in resp.content if b.type == "text")
         if schema is None:
-            return text.strip() or None
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            log.error("Claude returned non-JSON: %r", text[:200])
-            return None
+            out = text.strip() or None
+        else:
+            try:
+                out = json.loads(text)
+            except json.JSONDecodeError:
+                log.error("Claude returned non-JSON: %r", text[:200])
+                out = None
+        self._record(kind, image_b64, prompt, schema, resp, out)
+        return out
 
     def identify_module(self, frame_bgr: np.ndarray, candidates: list[str]) -> ModuleID:
         prompt = (
@@ -142,7 +179,7 @@ class Verifier:
             f"Candidates: {', '.join(candidates)}. "
             "Answer with exactly one candidate name, or 'unknown' if no module is clearly held."
         )
-        out = self._ask(encode_jpeg(frame_bgr), prompt, _MODULE_SCHEMA)
+        out = self._ask(encode_jpeg(frame_bgr), prompt, _MODULE_SCHEMA, kind="identify")
         if not isinstance(out, dict):
             return ModuleID("unknown", False, "verification unavailable")
         name = out.get("module", "unknown")
@@ -165,7 +202,7 @@ class Verifier:
             "Report the label of the port that cable is actually in ('none' if it is not in any port). "
             "Write I2C ports as I2C_1..I2C_4 if labels are drawn, otherwise just I2C."
         )
-        out = self._ask(encode_jpeg(frame_bgr, max_side=1280), prompt, _PLUG_SCHEMA)
+        out = self._ask(encode_jpeg(frame_bgr, max_side=1280), prompt, _PLUG_SCHEMA, kind="plug")
         if not isinstance(out, dict):
             return PlugCheck(None, None, "verification unavailable")
         plugged = {"yes": True, "no": False}.get(out.get("plugged", "unsure"))
@@ -190,5 +227,5 @@ class Verifier:
             "Answer in at most two short sentences, based only on what the photo shows. "
             "If the photo doesn't show enough to answer, say what to point the camera at instead."
         )
-        out = self._ask(encode_jpeg(frame_bgr), prompt, None)
+        out = self._ask(encode_jpeg(frame_bgr), prompt, None, kind="question")
         return out if isinstance(out, str) else None
