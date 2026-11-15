@@ -1,158 +1,268 @@
-# Pinpoint
+<div align="center">
 
-A FaceTime call that guides your hands, so blind and Deaf makers can build electronics with a standard starter kit (Arduino + Grove Base Shield). Our EmoryHacks 2026 project.
+# PinPoint
 
-## How a build goes
+### Your idea. Your parts. Your AI hardware co-builder on FaceTime.
 
-You FaceTime Pinpoint and keep the call open the whole time. The phone doesn't need a stand.
+**From loose components to a working circuit: one conversation at a time.**
 
-1. **Pinpoint tells you what to pick up and where it goes, by touch.** For example: "Plug the distance sensor into D7. It's in the third row back from the edge nearest you, the second port from the left."
-2. **When it needs to see something, it asks you to hold up the phone.** For example: "Pick up the phone and hold it about a hand's width above D7."
-   - Pinpoint takes the photo automatically once the picture is steady and sharp.
-   - If it can see the board's corner markers, it tells you how to aim: "Move the phone a little to your left."
-   - Then it says "Got it. You can put the phone down."
-3. **Claude checks the photo.** It confirms the right module, or that the cable is in the right port. If you used the wrong port, Pinpoint says something like "That looks like D8, not D6."
-4. **You can ask questions at any time**, by voice or iMessage. For example, "is this plugged in the right way round?" Pinpoint asks for a photo and answers.
-5. **After the last plug, you connect the USB cable.** Pinpoint reads the Arduino's sensor values and says "It works!" Then a recap arrives by iMessage.
+[Watch the demo](https://www.youtube.com/watch?v=Aq5WXmQQooo) · [Devpost](https://devpost.com/software/pinpoint-9pyk0w) · [EmoryHacks 2026](https://emory-hacks-2026.devpost.com/)
 
-There are two output modes:
-- **Voice mode** (blind and low-vision): spoken directions.
-- **Visual mode** (Deaf and hard of hearing): big captions burned into Pinpoint's FaceTime video, with the target port highlighted. Thumbs-up means next, an open palm means repeat.
+</div>
 
-`PINPOINT_GUIDANCE=live` switches to the original design: the phone sits on an overhead stand, and Pinpoint steers your fingertip in real time ("right two ports… stop, that's D7").
+---
 
-## Code map
+## What is PinPoint?
 
-| Path | What it does |
-|---|---|
-| `backend/main.py` | FastAPI server: Chert webhooks (`/chert/webhook`, `/chert/imessage/webhook`), dashboard, commands |
-| `backend/chert_adapter.py` | **The only file that talks to Chert:** accepts `call.incoming` with LiveKit tokens; iMessage send, attachments, inbound signature check |
-| `backend/chert_agent.py` | The LiveKit agent worker that `chert dev` dispatches into each call (greets on `chert_bridge_ready`), plus the dashboard |
-| `backend/livekit_transport.py` | Call media: joins the call's LiveKit room, reads the caller's video and audio tracks, publishes Pinpoint's voice and a captioned video track |
-| `backend/session.py` | One session per call: frame loop, photo on demand, Claude jobs, speech and captions |
-| `backend/stt.py` | Speech-to-text with local faster-whisper (Chert has no transcription) |
-| `backend/vision/capture.py` | Picks the steady, sharp frame and gives aiming hints |
-| `backend/vision/shield.py` | Corner markers → board position → port map (`shield_layout.yaml`) |
-| `backend/vision/hands.py` | MediaPipe fingertip and gestures |
-| `backend/vision/verify.py` | Claude: identify the module, check the plug, answer questions |
-| `backend/guidance/engine.py` | Step state machine, commands, recap |
-| `backend/guidance/speech.py` / `overlay.py` | Speech timing and text-to-speech / captions and on-screen highlights |
-| `backend/hardware/serial_monitor.py` | Reads `dist=… lcd=…` from the Arduino and diagnoses wrong ports |
-| `backend/projects/*.yaml` | Build steps (proximity alert; colour reader is a stretch goal) |
-| `arduino/proximity_alert/` | The sketch, uploaded before the demo |
-| `backend/build/` | Elegoo flow: kit catalog, breadboard model + plan checker, Claude planner, project library, build engine |
-| `backend/build_session.py` | One call in the Elegoo flow: planner, photo checks, arduino-cli upload, USB test |
-| `tools/` | Model download, marker PDF, port calibration, terminal simulators (`sim_terminal` Elegoo, `sim_grove`), `setup_arduino`, `chert_setup` (check keys, register iMessage webhook), `fake_bridge` (pretend to be Chert for local tests) |
+**PinPoint is an AI-powered hardware building companion that you can FaceTime.** Tell it what you want to make, show it the components you have, and follow step-by-step guidance, from planning and placing wires to checking your circuit and testing supported Arduino builds.
 
-## Elegoo kit: build anything the judge asks for (default)
+The idea is simple: you shouldn't need an engineering degree, an experienced friend, or seventeen tutorial tabs to start building electronics. PinPoint is for **beginners, hobbyists, experienced makers, student teams, and educators**. It is also **inclusive by design**, supporting different ways to receive instructions and interact with the agent.
 
-With `PINPOINT_KIT=elegoo` (the default), Pinpoint works with an ELEGOO UNO R3 Most Complete starter kit
-and a breadboard, and nothing is scripted:
+Built by a two-person team at **EmoryHacks 2026** for the **Rogue** main track, with a focus on the **Chert** and **Coder for Good** side challenges.
 
-1. **"What would you like to build today?"** The caller describes anything ("something that beeps when my
-   cat gets near the snacks").
-2. **Claude designs it** from the parts in the kit (`backend/build/elegoo_most_complete.yaml`): parts, every
-   wire, and the Arduino sketch. Code then checks the plan (`backend/build/board.py`): no shorts, a resistor
-   on every LED, no floating legs, one lead per hole, everything within rows 1-30 so it can be counted by
-   touch. Problems go back to Claude to fix (up to twice). If it still isn't safe, or Claude is offline,
-   Pinpoint offers the closest of 15 hand-checked projects (`backend/build/library.yaml`: 5 beginner, 10
-   advanced). Requests the kit can't do safely (mains power, heating) are politely declined with an
-   alternative.
-3. **Pinpoint reads the plan back** and asks "Shall we build it?". The caller can say yes, or ask for changes.
-4. **Wiring by touch**, one step at a time: "Put the long leg into row 10, counting 10 from the left end, the
-   hole right beside the groove, on your side." A setup photo learns how the board is facing; each part is
-   photo-checked (resistors are identified by their colour bands); a final photo checks the whole circuit.
-5. **Pinpoint programs the Arduino itself** with arduino-cli (the sketch is compiled, and fixed by Claude if
-   needed, while the caller is still wiring), then **tests it over USB** ("cover the light sensor...") and
-   says "It works!". The recap and the sketch arrive by iMessage.
+## How a build works
 
-Setup, once per laptop: install arduino-cli (`winget install ArduinoSA.CLI`), then
-`python -m tools.setup_arduino` (AVR core + libraries, compiles every library project as a check).
+1. **Describe your idea.** Say what you're trying to build, from a simple LED circuit to a sensor driven alarm. PinPoint asks follow-up questions and works with the components you have.
+2. **Get a feasible plan.** Claude proposes components, a wiring plan and an Arduino sketch. A separate circuit checker examines constraints before the build instructions are presented.
+3. **Show your workspace.** When asked, hold your camera above your board. Camera-frame selection, visual checks, and four printed reference markers help relate what the AI sees to physical positions.
+4. **Build together.** Follow instructions one step at a time. Ask questions, repeat a step, or request a wiring check without losing the conversation's current context.
+5. **Verify the result.** On compatible builds, Arduino CLI and USB serial feedback can be used to compile/upload a sketch and check actual sensor behavior.
+6. **Bring others along.** A local FastAPI dashboard makes the session easier to follow on a laptop or classroom display, with session information and visual guidance.
 
-Rehearse without a phone: `python -m tools.sim_terminal` (real Claude planner) or `--offline` (library
-only). The Grove Base Shield flow is still there: `PINPOINT_KIT=grove`, simulator `python -m tools.sim_grove`.
+> Example: “I want an alarm when someone gets close to my desk.” PinPoint helps select a distance sensor, decide how to trigger the alert, wire the circuit, and test it.
 
-## Run it with Chert, step by step
+## One platform, different ways to build
 
-How the call works ([Chert docs](https://docs.trychert.com/facetime/introduction)):
-- Chert sends a `call.incoming` webhook. Pinpoint replies "accept" with a LiveKit room and tokens.
-- Chert's bridge then joins that LiveKit room and publishes the caller's camera and mic (`facetime-remote-video`, `facetime-remote-audio`).
-- Pinpoint joins the same room. It reads those tracks and publishes its voice plus a captioned video. Chert has no captions API, so the captions live in that video.
-- The recap and typed commands go through Chert's separate Messaging (iMessage) API.
+PinPoint's intended audience is **everyone who wants to build electronics**. Accessibility is part of the design rather than a separate product.
 
-**1. Install**, once per laptop:
+| Interaction | Experience |
+| --- | --- |
+| **Voice-guided** | Spoken explanations and tactile-style positional directions, especially useful for blind and low-vision makers. |
+| **Visual-guided** | Large captions, highlighted targets, and step prompts for users who prefer or need visual instructions, including Deaf and hard-of-hearing makers. |
+| **Text-guided** | Chert iMessage integration provides a path for typed questions and build recaps, useful for nonspeaking users and anyone who prefers typing. |
+| **Hands-free / continuous guidance** | An experimental overhead-camera mode tracks hands and offers in-the-moment positioning cues; this remains an area of active development and testing. |
+
+Accessibility features are **not a claim of independent validation by blind, Deaf, or nonspeaking users**. We welcome feedback and testing with the communities these features are intended to support.
+
+## How it works — technical architecture
+
+```text
+                  iPhone / FaceTime + iMessage
+                             |
+                         Chert API
+                             |
+                   LiveKit audio / video
+                             |
+                 PinPoint Python backend
+                  (FastAPI + sessions)
+                      /      |      \
+                     /       |       \
+           Speech / captions |     Vision pipeline
+          (faster-whisper,   |     (OpenCV, markers,
+           TTS, overlays)    |      MediaPipe, Claude)
+                             |
+                   Planning / validation
+                    (Claude + circuit
+                   model + YAML library)
+                             |
+               Build guidance + Arduino CLI
+                             |
+                 Arduino over USB / serial
+                             |
+                Sensor readings / test results
+
+                 + Local dashboard (:8000)
+```
+
+### Main components
+
+| Component | Responsibility |
+| --- | --- |
+| **Chert + LiveKit** | FaceTime call connection and bidirectional media transport; iMessage for typed interactions and recaps. |
+| **Claude / Anthropic API** | Understands build requests, proposes circuits and sketches, and reasons about camera images. |
+| **Circuit validation** | Checks generated wiring plans against constraints such as short circuits, unsupported connections, and resistor requirements before assembly. |
+| **OpenCV + printed markers** | Selects usable frames, estimates board orientation, and maps observed positions to physical reference points. |
+| **MediaPipe** | Supports hand and gesture recognition for experimental guidance and hands-free input. |
+| **faster-whisper + speech output** | Speech-to-text, spoken instructions, and captions/overlays for different interaction modes. |
+| **FastAPI + session engine** | Tracks calls, steps, user commands, verification requests, and local monitoring. |
+| **Arduino CLI + PySerial** | Compiles/uploads compatible Arduino sketches and reads serial data to verify supported builds. |
+
+### Why physical verification matters
+
+An LLM can produce a convincing-looking circuit that doesn't work. PinPoint therefore separates **generating a plan** from **checking it**. The repository contains a breadboard representation and plan checker, a supported parts catalog, and a fallback library of curated builds. Camera-based checks help connect those abstract plans to actual physical connections. For compatible projects, serial sensor readings provide another feedback channel after wiring.
+
+This is a prototype, not a substitute for electrical inspection or expert supervision. PinPoint focuses on **low-voltage educational electronics**, not mains wiring or unsafe appliance repair.
+
+## Hardware
+
+Our EmoryHacks setup uses:
+
+- An **ELEGOO Mega Project / Mega 2560-compatible starter kit** (including its breadboard components).
+- A separate **Arduino UNO board** for compatible builds.
+- Grove modules, including a **distance sensor** and **RGB-backlit LCD**.
+- Breadboards, jumper cables, USB A-to-B cables, and other standard kit components.
+- **Four printed reference markers** used for visual positioning and calibration.
+
+**Important board note:** The codebase's default ELEGOO catalog was initially written around an **UNO R3-style starter kit**. The physical kit pictured at the hackathon includes a **Mega 2560-compatible board**. Select the actual board and pin mapping when running Arduino CLI; not all boards, sensor shields, or sample sketches are interchangeable.
+
+## Repository structure
+
+```text
+PinPoint/
+├── arduino/proximity_alert/      # Sample Arduino sketch
+├── backend/
+│   ├── main.py                  # FastAPI app and webhook entry points
+│   ├── chert_adapter.py         # Chert FaceTime/iMessage integration
+│   ├── chert_agent.py           # LiveKit/Chert agent worker
+│   ├── livekit_transport.py     # Real-time audio/video tracks
+│   ├── session.py               # Per-call state and frame processing
+│   ├── stt.py                   # Speech recognition
+│   ├── build/                   # Parts catalog, planner, validation, library
+│   ├── build_session.py         # Kit-aware guided assembly flow
+│   ├── guidance/                # Step engine, speech, visual overlays
+│   ├── vision/                  # Capture, markers, hands, verification
+│   ├── hardware/                # Arduino USB / serial monitor
+│   └── projects/                # Curated project definitions
+├── dashboard/                   # Local session-monitoring interface
+├── markers/                     # Printable calibration/reference markers
+├── tests/                       # Automated tests
+├── tools/                       # Setup, simulation, calibration, mock bridge
+├── .env.example                 # Credential and mode configuration template
+└── requirements.txt             # Python dependencies
+```
+
+## Getting started
+
+### Prerequisites
+
+- Python and `pip` (use a version supported by this project's pinned dependencies).
+- A Chert account with an assigned FaceTime line and the credentials required by the selected Chert integration path.
+- LiveKit project credentials and an Anthropic API key for the AI-powered flow.
+- An Arduino board and USB connection for physical tests; `arduino-cli` installed for sketch compilation/upload.
+- Printed reference markers for calibrated board positioning.
+
+### 1. Clone and install
+
 ```bash
+git clone https://github.com/pulkithanda/PinPoint.git
+cd PinPoint
 python -m venv .venv
-.venv\Scripts\activate            # macOS/Linux: source .venv/bin/activate
+```
+
+**macOS / Linux:**
+
+```bash
+source .venv/bin/activate
 pip install -r requirements.txt
-python -m tools.download_models   # optional pre-download; otherwise fetched automatically on startup
-```
-The Whisper speech model (~140 MB) downloads on the first call.
-On Debian/Ubuntu Linux hosts (including remote development containers), install MediaPipe's native graphics libraries and eSpeak NG for generated call audio:
-```bash
-sudo apt-get update && sudo apt-get install -y libegl1 libgles2 espeak-ng
 ```
 
-**2. Get keys and fill in `.env`** (copy `.env.example`):
-- **LiveKit:** create a free project at [cloud.livekit.io](https://cloud.livekit.io). Copy the `wss://` URL, API key and API secret.
-- **Chert FaceTime:** dashboard → Developer → Project API keys. You need the `ftk_...` key and the project ID.
-- **Chert Messaging:** the tenant signing secret, and the tenant slug if your account has several tenants.
-- **Claude:** `ANTHROPIC_API_KEY`.
-- **Recap recipient:** `CHERT_IMESSAGE_TO` = the builder's phone number. This is needed because Chert only gives a hash of the caller's number.
+**Windows PowerShell:**
 
-Then run `python -m tools.chert_setup check`. It mints a test token and calls `GET /v1/lines` to prove the keys work.
-
-**3. Prepare the hardware.** See [Markers](#markers) below.
-- Upload `arduino/proximity_alert/proximity_alert.ino`. It needs the Seeed *Grove Ultrasonic Ranger* and *Grove LCD RGB Backlight* libraries.
-- Plug the Arduino's USB into this laptop.
-- Stick the markers on, then run `python -m tools.calibrate_ports`.
-
-**4 (recommended). The `chert dev` way: no tunnel, no webhook.**
 ```powershell
-python -m backend.chert_agent start                                  # terminal 1: agent worker + dashboard on :8000
-npx --yes @trychert/facetime@0.1.0-beta.20 dev --agent pinpoint      # terminal 2: ADMIN PowerShell (Windows needs it)
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 ```
-Wait for `"pinpoint" is in a waiting room`, then make a **FaceTime Video** call to the number it prints. Skip steps 4 (webhook) and 5 below.
 
-**4 (alternative). Webhook backend and a public tunnel:**
+Optional: pre-download speech models with `python -m tools.download_models`. The first run may otherwise download model files.
+
+### 2. Configure credentials and modes
+
+Copy `.env.example` to `.env` and fill in only the keys relevant to your chosen integration. **Never commit `.env`, API keys, phone numbers, or secrets.**
+
+Important environment variable groups (the authoritative list is in [`.env.example`](.env.example)):
+
+```dotenv
+ANTHROPIC_API_KEY=
+LIVEKIT_URL=wss://your-project.livekit.cloud
+LIVEKIT_API_KEY=
+LIVEKIT_API_SECRET=
+CHERT_FACETIME_API_KEY=
+CHERT_PROJECT_ID=
+CHERT_MESSAGING_SECRET=
+AGENT_NAME=pinpoint
+PINPOINT_KIT=elegoo
+PINPOINT_GUIDANCE=snapshot
+PINPOINT_MODE=
+PINPOINT_SERIAL_PORT=auto
+```
+
+`PINPOINT_KIT=elegoo` selects kit-aware planning; `grove` selects the Grove Base Shield workflow. `PINPOINT_GUIDANCE=snapshot` prompts the caller to hold the phone up when needed; `live` is the experimental overhead-camera mode. Set `PINPOINT_MODE=voice` or `visual`, or leave it empty to choose at call start.
+
+### 3. Test without a FaceTime call
+
+Try a terminal build first:
+
 ```bash
-python -m backend.main --source chert       # add --guidance live for the stand version
-ngrok http 8000                            # or: cloudflared tunnel --url http://localhost:8000
+python -m tools.sim_terminal
 ```
 
-**5. Connect Chert to the tunnel:**
-- **FaceTime:** in the Chert dashboard, go to Workers & Lines → Integration. Set the HTTPS webhook to `https://<tunnel>/chert/webhook` and assign it to your line, with `customer_decides` and no default Assistant.
-- **iMessage:** run `python -m tools.chert_setup subscribe-imessage https://<tunnel>/chert/imessage/webhook`. Put the printed secret in `.env` as `CHERT_MESSAGING_WEBHOOK_SECRET`, then restart the backend.
+For the curated-project fallback without Claude:
 
-**6. Call.** FaceTime your Chert line, then open http://localhost:8000 to watch what Pinpoint sees. Say "voice mode" (or show a thumbs-up for visual mode), then follow the instructions. Commands: `ready`, `done`, `repeat`, `help`, `back`, `skip`, `what am I holding`, or any question, spoken or texted to the line.
+```bash
+python -m tools.sim_terminal --offline
+```
 
-**Testing without Chert:**
-- `python -m tools.fake_bridge --say "voice mode" --say "ready"` plays Chert's part against a local `livekit-server --dev`. Set `LIVEKIT_URL=ws://127.0.0.1:7880`, `LIVEKIT_API_KEY=devkey` and `LIVEKIT_API_SECRET=secret`.
-- `python -m backend.main --source webcam` runs the same flow on the laptop webcam and speakers.
-- `python -m tools.sim_terminal` steps through a build in the terminal.
-- `python -m pytest -q` runs the tests.
+Run automated checks:
 
-**Not in Chert's docs yet (ask them):**
-- the FaceTime webhook signature header
-- the call-ended event (Pinpoint detects the bridge leaving the room instead)
-- the caller's plaintext number
-- the frame rate and resolution of the caller's video
+```bash
+python -m pytest -q
+```
 
-## Markers
+A local webcam workflow is also provided:
 
-The four printed squares tell Pinpoint where the shield is and which way round it is, so it can find each port in a photo.
+```bash
+python -m backend.main --source webcam
+```
 
-1. **Check the print scale.** The scale bar on the page must measure 50 mm. If it doesn't, reprint at 100% ("actual size", not "fit to page").
-2. **Cut out the four squares.** Keep the thin white border around each black square, because the detector needs that border.
-3. **Sit the board the way the builder will use it,** with the side they reach from as "near". Then attach one marker at each corner of the Grove Base Shield. Use small loops of tape behind the marker, or tape over the white border only, never over the black pattern.
-   - id 0 at the far-left corner
-   - id 1 at the far-right corner
-   - id 2 at the near-right corner
-   - id 3 at the near-left corner
-4. **Keep them flat and upright,** with the printed id label readable from the builder's seat. Don't cover any port. If the shield's corners are crowded, stick the markers on a piece of card under the Arduino, just outside each corner. They only need to stay fixed relative to the board.
-5. **Measure** the distance between marker centres in mm and enter it in `backend/vision/shield_layout.yaml` under `markers`. Marker 0 is `[0, 0]`, x goes right and y goes toward the builder.
-6. **Calibrate:** run `python -m tools.calibrate_ports`, hold the camera over the board, and click the centre of each port when prompted. Press `s` to save.
+### 4. Set up Arduino and markers
 
-## Wording
+```bash
+python -m tools.setup_arduino
+python -m tools.calibrate_ports
+```
 
-Say "live hand guidance on standard maker hardware over a normal video call, with no extra hardware". Don't say "first ever". Say "designed with" blind and Deaf makers, not "approved by", unless a blind or Deaf user has actually tested it.
+Print the four marker squares at **100% / actual size**, keep the white border visible, and follow the marker IDs and calibration instructions in the existing project documentation. Connect the board by USB and ensure the sketch's target board, port, and pins match your actual hardware.
+
+The curated proximity-alarm sketch lives in `arduino/proximity_alert/`.
+
+### 5. Connect Chert
+
+The repository documents two integration routes. The **development worker** path uses two terminals:
+
+```bash
+# Terminal 1
+python -m backend.chert_agent start
+```
+
+```bash
+# Terminal 2 (with Chert CLI access)
+npx --yes @trychert/facetime@0.1.0-beta.20 dev --agent pinpoint
+```
+
+Once the agent is in a Chert waiting room, FaceTime the assigned line. Open `http://localhost:8000` for the local dashboard.
+
+Alternatively, the webhook-based path runs `python -m backend.main --source chert` behind a public HTTPS tunnel and connects `/chert/webhook` and `/chert/imessage/webhook` in the Chert integration settings. Consult the existing Chert setup documentation and [Chert's official docs](https://docs.trychert.com/) for credentials and current CLI requirements; do not use real secrets in shared commands or screenshots.
+
+### Useful guidance commands
+
+During a build, the session engine supports instructions such as `ready`, `done`, `repeat`, `help`, `back`, and `skip`. It also accepts natural-language questions about the current step and requests to verify components or connections.
+
+## What we've built and what's next
+
+The repository includes a kit-aware planner, circuit checker, curated builds, Chert/LiveKit integration code, speech and camera processing, step tracking, Arduino tooling, testing utilities, and a local dashboard. **Having code for a feature does not mean every integration has been validated end to end**; behavior depends on hardware, credentials, camera calibration, and the deployed Chert line.
+
+Next we want to expand the supported components and verified projects, refine continuous hands-free guidance and visual overlays, improve resume-after-disconnect behavior, strengthen iMessage-based interaction, and test accessibility workflows with actual makers. Longer-term possibilities include electronics diagnostics and classroom-scale collaborative builds.
+
+## Built with
+
+**Python · FastAPI · Anthropic Claude · Chert · LiveKit · OpenCV · MediaPipe · faster-whisper · Arduino · Arduino CLI · PySerial · PyYAML · ELEGOO · Grove · Coder · VS Code · Claude Code · GitHub**
+
+## Team and links
+
+Created at **EmoryHacks 2026**.
+
+- **Devpost:** https://devpost.com/software/pinpoint-9pyk0w
+- **Demo video:** https://www.youtube.com/watch?v=Aq5WXmQQooo
+- **Source code:** https://github.com/pulkithanda/PinPoint
+
+> **Your idea. Your parts. Your AI hardware co-builder on FaceTime.**
