@@ -3,20 +3,16 @@ Download the MediaPipe gesture recognizer model (hand landmarks + gestures)
 """
 from __future__ import annotations
 
-import urllib.request
-
 from backend.config import Settings
-from backend.vision.hands import GESTURE_MODEL_URL
+from backend.vision.hands import ensure_gesture_model
 
 
 def main() -> None:
     dest = Settings().gesture_model
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.exists():
+    if dest.is_file() and dest.stat().st_size > 0:
         print(f"Already present: {dest}")
         return
-    print(f"Downloading {GESTURE_MODEL_URL}\n -> {dest}")
-    urllib.request.urlretrieve(GESTURE_MODEL_URL, dest)
+    ensure_gesture_model(dest)
     print(f"Done ({dest.stat().st_size // 1024} KB)")
 
 

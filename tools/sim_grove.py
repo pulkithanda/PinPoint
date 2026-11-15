@@ -1,7 +1,7 @@
 """
 Step through a build in the terminal with fake fingertip input (no camera, no Chert).
 
-    python -m tools.sim_terminal [--project proximity_alert] [--no-verifier] [--live]
+    python -m tools.sim_grove [--project proximity_alert] [--no-verifier] [--live]
 
 Default is snapshot guidance (photo on demand); --live simulates the phone on a stand.
 

@@ -19,12 +19,18 @@ def _load_dotenv() -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
+        key = key.strip()
+        if not key:
+            continue
         value = value.strip()
         if value[:1] in ('"', "'") and value[0] in value[1:]:
             value = value[1:value.index(value[0], 1)]       # quoted: keep everything inside
         else:
             value = value.split(" #", 1)[0].split("\t#", 1)[0].strip()  # drop inline comments
-        os.environ.setdefault(key.strip(), value)
+            if value.startswith("#"):
+                value = ""
+        if not os.environ.get(key):
+            os.environ[key] = value
 
 _load_dotenv()
 
@@ -69,6 +75,15 @@ class Settings:
     guidance: str = field(default_factory=lambda: _env("PINPOINT_GUIDANCE", "snapshot"))
     capture_timeout_s: float = 15.0
     sonify: bool = field(default_factory=lambda: _env_bool("PINPOINT_SONIFY", False))
+
+    # Which kit the call guides: "elegoo" (breadboard, judge-chosen builds) or "grove" (Base Shield script)
+    kit: str = field(default_factory=lambda: _env("PINPOINT_KIT", "elegoo").strip().lower())
+    planner_effort: str = field(default_factory=lambda: _env("PINPOINT_PLANNER_EFFORT", "medium"))
+    # Stop talking the moment the caller starts speaking (turn off if the phone echoes Pinpoint's voice back)
+    barge_in: bool = field(default_factory=lambda: _env_bool("PINPOINT_BARGE_IN", True))
+    # Chert ends calls at 5 minutes (trial and Shared plans): warn 30 s before; offer to resume on call-back
+    call_limit_s: float = field(default_factory=lambda: float(_env("PINPOINT_CALL_LIMIT_S", "300")))
+    resume_window_s: float = field(default_factory=lambda: float(_env("PINPOINT_RESUME_WINDOW_S", "1800")))
 
     # Speech in (Chert has no transcription): local faster-whisper on the caller's audio
     stt_model: str = field(default_factory=lambda: _env("PINPOINT_STT_MODEL", "base.en"))

@@ -1,0 +1,890 @@
+# Hand-checked builds for the Elegoo kit. Pinpoint offers these when the judge asks for one of
+# them, when the live planner can't produce a safe plan, or when Claude isn't available.
+# Every plan here must pass backend.build.board.validate (tests/test_build_library.py checks it).
+# `keywords` help match a spoken request without Claude.
+#
+# Layout conventions (same as the planner's): breadboard flat, long side toward the builder,
+# holes A-E on the builder's side, rows 1-30 only, near rails: RAIL:N+ = 5 volts, RAIL:N- = GND.
+
+projects:
+
+  # ------------------------------------------------------------------ basics
+  - id: blink_led
+    title: Blinking light
+    difficulty: basic
+    keywords: [blink, led, light, flash, first, simple, hello]
+    summary: An LED that blinks on and off every second. The classic first circuit.
+    parts:
+      - {ref: LED1, part: led_red}
+      - {ref: R1, part: resistor_220}
+    steps:
+      - kind: wire
+        why: Connects the Arduino's ground to the minus rail.
+        connections: [{lead: end1, to: "UNO:GND"}, {lead: end2, to: "RAIL:N-"}]
+      - kind: place
+        ref: LED1
+        why: The light itself. Current flows in the long leg and out the short leg.
+        connections: [{lead: anode, to: E10}, {lead: cathode, to: E11}]
+      - kind: place
+        ref: R1
+        why: The resistor limits the current so the LED doesn't burn out.
+        connections: [{lead: end1, to: D11}, {lead: end2, to: "RAIL:N-"}]
+      - kind: wire
+        why: Pin 13 switches the LED on and off.
+        connections: [{lead: end1, to: "UNO:D13"}, {lead: end2, to: D10}]
+    libraries: []
+    test: {type: serial, key: led, expect: varies, instruction: The light is blinking once a second now.}
+    sketch: |
+      const int LED_PIN = 13;
+      void setup() {
+        pinMode(LED_PIN, OUTPUT);
+        Serial.begin(9600);
+      }
+      void loop() {
+        digitalWrite(LED_PIN, HIGH);
+        Serial.println("led=1");
+        delay(500);
+        digitalWrite(LED_PIN, LOW);
+        Serial.println("led=0");
+        delay(500);
+      }
+
+  - id: button_led
+    title: Push-button light
+    difficulty: basic
+    keywords: [button, press, switch, push, doorbell]
+    summary: Press the button and the LED lights up; let go and it turns off.
+    parts:
+      - {ref: SW1, part: button}
+      - {ref: LED1, part: led_green}
+      - {ref: R1, part: resistor_220}
+    steps:
+      - kind: wire
+        why: Connects the Arduino's ground to the minus rail.
+        connections: [{lead: end1, to: "UNO:GND"}, {lead: end2, to: "RAIL:N-"}]
+      - kind: place
+        ref: SW1
+        why: The button connects its two sides together while you press it.
+        connections: [{lead: leg_a, to: E15}, {lead: leg_b, to: F17}]
+      - kind: wire
+        why: Pin 2 reads the button.
+        connections: [{lead: end1, to: "UNO:D2"}, {lead: end2, to: D15}]
+      - kind: wire
+        why: The other side of the button goes to ground, so pressing it pulls pin 2 low.
+        connections: [{lead: end1, to: G17}, {lead: end2, to: "RAIL:N-"}]
+      - kind: place
+        ref: LED1
+        why: The light.
+        connections: [{lead: anode, to: E10}, {lead: cathode, to: E11}]
+      - kind: place
+        ref: R1
+        why: Limits the LED current.
+        connections: [{lead: end1, to: D11}, {lead: end2, to: "RAIL:N-"}]
+      - kind: wire
+        why: Pin 8 powers the LED.
+        connections: [{lead: end1, to: "UNO:D8"}, {lead: end2, to: D10}]
+    libraries: []
+    test: {type: serial, key: button, expect: varies, instruction: Press and release the button a few times.}
+    sketch: |
+      const int BUTTON_PIN = 2;
+      const int LED_PIN = 8;
+      void setup() {
+        pinMode(BUTTON_PIN, INPUT_PULLUP);
+        pinMode(LED_PIN, OUTPUT);
+        Serial.begin(9600);
+      }
+      void loop() {
+        int pressed = digitalRead(BUTTON_PIN) == LOW ? 1 : 0;
+        digitalWrite(LED_PIN, pressed ? HIGH : LOW);
+        Serial.print("button=");
+        Serial.println(pressed);
+        delay(100);
+      }
+
+  - id: dimmer
+    title: Light dimmer
+    difficulty: basic
+    keywords: [dimmer, dim, knob, brightness, potentiometer, fade]
+    summary: Turn the knob to make the LED brighter or dimmer.
+    parts:
+      - {ref: POT1, part: potentiometer}
+      - {ref: LED1, part: led_yellow}
+      - {ref: R1, part: resistor_220}
+    steps:
+      - kind: wire
+        why: Brings 5 volts to the plus rail.
+        connections: [{lead: end1, to: "UNO:5V"}, {lead: end2, to: "RAIL:N+"}]
+      - kind: wire
+        why: Brings ground to the minus rail.
+        connections: [{lead: end1, to: "UNO:GND"}, {lead: end2, to: "RAIL:N-"}]
+      - kind: place
+        ref: POT1
+        why: The knob. Its middle leg gives a voltage that follows the knob.
+        connections: [{lead: left, to: E20}, {lead: wiper, to: E21}, {lead: right, to: E22}]
+      - kind: wire
+        why: One end of the knob to 5 volts.
+        connections: [{lead: end1, to: D20}, {lead: end2, to: "RAIL:N+"}]
+      - kind: wire
+        why: The other end of the knob to ground.
+        connections: [{lead: end1, to: D22}, {lead: end2, to: "RAIL:N-"}]
+      - kind: wire
+        why: Analog pin A0 reads the knob.
+        connections: [{lead: end1, to: D21}, {lead: end2, to: "UNO:A0"}]
+      - kind: place
+        ref: LED1
+        why: The light.
+        connections: [{lead: anode, to: E10}, {lead: cathode, to: E11}]
+      - kind: place
+        ref: R1
+        why: Limits the LED current.
+        connections: [{lead: end1, to: D11}, {lead: end2, to: "RAIL:N-"}]
+      - kind: wire
+        why: Pin 9 can dim the LED by switching it very fast.
+        connections: [{lead: end1, to: "UNO:D9"}, {lead: end2, to: D10}]
+    libraries: []
+    test: {type: serial, key: knob, expect: varies, instruction: Turn the knob slowly from one end to the other.}
+    sketch: |
+      const int KNOB_PIN = A0;
+      const int LED_PIN = 9;
+      void setup() {
+        pinMode(LED_PIN, OUTPUT);
+        Serial.begin(9600);
+      }
+      void loop() {
+        int knob = analogRead(KNOB_PIN);
+        analogWrite(LED_PIN, knob / 4);
+        Serial.print("knob=");
+        Serial.println(knob);
+        delay(100);
+      }
+
+  - id: night_light
+    title: Automatic night light
+    difficulty: basic
+    keywords: [night, dark, light sensor, photoresistor, automatic, lamp]
+    summary: The LED switches on by itself when it gets dark.
+    parts:
+      - {ref: LDR1, part: photoresistor}
+      - {ref: R1, part: resistor_10k}
+      - {ref: LED1, part: led_white}
+      - {ref: R2, part: resistor_220}
+    steps:
+      - kind: wire
+        why: Brings 5 volts to the plus rail.
+        connections: [{lead: end1, to: "UNO:5V"}, {lead: end2, to: "RAIL:N+"}]
+      - kind: wire
+        why: Brings ground to the minus rail.
+        connections: [{lead: end1, to: "UNO:GND"}, {lead: end2, to: "RAIL:N-"}]
+      - kind: place
+        ref: LDR1
+        why: The light sensor. More light lets more current through.
+        connections: [{lead: end1, to: E15}, {lead: end2, to: E16}]
+      - kind: wire
+        why: Powers the light sensor.
+        connections: [{lead: end1, to: D15}, {lead: end2, to: "RAIL:N+"}]
+      - kind: place
+        ref: R1
+        why: With the sensor, makes a voltage that rises with the light.
+        connections: [{lead: end1, to: D16}, {lead: end2, to: "RAIL:N-"}]
+      - kind: wire
+        why: Analog pin A0 reads the light level.
+        connections: [{lead: end1, to: C16}, {lead: end2, to: "UNO:A0"}]
+      - kind: place
+        ref: LED1
+        why: The night light.
+        connections: [{lead: anode, to: E10}, {lead: cathode, to: E11}]
+      - kind: place
+        ref: R2
+        why: Limits the LED current.
+        connections: [{lead: end1, to: D11}, {lead: end2, to: "RAIL:N-"}]
+      - kind: wire
+        why: Pin 9 switches the LED.
+        connections: [{lead: end1, to: "UNO:D9"}, {lead: end2, to: D10}]
+    libraries: []
+    test: {type: serial, key: light, expect: varies, instruction: Cover the light sensor with your hand, then uncover it.}
+    sketch: |
+      const int SENSOR_PIN = A0;
+      const int LED_PIN = 9;
+      const int DARK = 400;
+      void setup() {
+        pinMode(LED_PIN, OUTPUT);
+        Serial.begin(9600);
+      }
+      void loop() {
+        int light = analogRead(SENSOR_PIN);
+        digitalWrite(LED_PIN, light < DARK ? HIGH : LOW);
+        Serial.print("light=");
+        Serial.println(light);
+        delay(100);
+      }
+
+  - id: traffic_light
+    title: Traffic light
+    difficulty: basic
+    keywords: [traffic, stop, red yellow green, three leds, sequence]
+    summary: Red, yellow and green LEDs that cycle like a real traffic light.
+    parts:
+      - {ref: LED1, part: led_red}
+      - {ref: LED2, part: led_yellow}
+      - {ref: LED3, part: led_green}
+      - {ref: R1, part: resistor_220}
+      - {ref: R2, part: resistor_220}
+      - {ref: R3, part: resistor_220}
+    steps:
+      - kind: wire
+        why: Brings ground to the minus rail.
+        connections: [{lead: end1, to: "UNO:GND"}, {lead: end2, to: "RAIL:N-"}]
+      - kind: place
+        ref: LED1
+        why: The red light.
+        connections: [{lead: anode, to: E5}, {lead: cathode, to: E6}]
+      - kind: place
+        ref: R1
+        why: Limits the red LED's current.
+        connections: [{lead: end1, to: D6}, {lead: end2, to: "RAIL:N-"}]
+      - kind: wire
+        why: Pin 10 drives red.
+        connections: [{lead: end1, to: "UNO:D10"}, {lead: end2, to: D5}]
+      - kind: place
+        ref: LED2
+        why: The yellow light.
+        connections: [{lead: anode, to: E10}, {lead: cathode, to: E11}]
+      - kind: place
+        ref: R2
+        why: Limits the yellow LED's current.
+        connections: [{lead: end1, to: D11}, {lead: end2, to: "RAIL:N-"}]
+      - kind: wire
+        why: Pin 9 drives yellow.
+        connections: [{lead: end1, to: "UNO:D9"}, {lead: end2, to: D10}]
+      - kind: place
+        ref: LED3
+        why: The green light.
+        connections: [{lead: anode, to: E15}, {lead: cathode, to: E16}]
+      - kind: place
+        ref: R3
+        why: Limits the green LED's current.
+        connections: [{lead: end1, to: D16}, {lead: end2, to: "RAIL:N-"}]
+      - kind: wire
+        why: Pin 8 drives green.
+        connections: [{lead: end1, to: "UNO:D8"}, {lead: end2, to: D15}]
+    libraries: []
+    test: {type: serial, key: phase, expect: varies, instruction: The lights are cycling green, yellow, red.}
+    sketch: |
+      const int RED = 10, YELLOW = 9, GREEN = 8;
+      void show(int phase, int r, int y, int g, int ms) {
+        digitalWrite(RED, r); digitalWrite(YELLOW, y); digitalWrite(GREEN, g);
+        unsigned long until = millis() + ms;
+        while (millis() < until) {
+          Serial.print("phase=");
+          Serial.println(phase);
+          delay(200);
+        }
+      }
+      void setup() {
+        pinMode(RED, OUTPUT); pinMode(YELLOW, OUTPUT); pinMode(GREEN, OUTPUT);
+        Serial.begin(9600);
+      }
+      void loop() {
+        show(0, LOW, LOW, HIGH, 3000);
+        show(1, LOW, HIGH, LOW, 1000);
+        show(2, HIGH, LOW, LOW, 3000);
+      }
+
+  # ------------------------------------------------------------------ advanced
+  - id: proximity_alarm
+    title: Proximity alarm
+    difficulty: advanced
+    keywords: [distance, ultrasonic, proximity, close, near, parking, sonar, approach, intruder]
+    summary: Beeps faster and lights up as something gets closer to the distance sensor, like a parking sensor.
+    parts:
+      - {ref: US1, part: hc_sr04}
+      - {ref: BZ1, part: buzzer_active}
+      - {ref: LED1, part: led_red}
+      - {ref: R1, part: resistor_220}
+    steps:
+      - kind: wire
+        why: Brings 5 volts to the plus rail.
+        connections: [{lead: end1, to: "UNO:5V"}, {lead: end2, to: "RAIL:N+"}]
+      - kind: wire
+        why: Brings ground to the minus rail.
+        connections: [{lead: end1, to: "UNO:GND"}, {lead: end2, to: "RAIL:N-"}]
+      - kind: place
+        ref: US1
+        why: The distance sensor sends a chirp from one eye and listens for the echo with the other.
+        connections: [{lead: VCC, to: E20}, {lead: Trig, to: E21}, {lead: Echo, to: E22}, {lead: GND, to: E23}]
+      - kind: wire
+        why: Powers the sensor.
+        connections: [{lead: end1, to: D20}, {lead: end2, to: "RAIL:N+"}]
+      - kind: wire
+        why: Pin 7 tells the sensor to chirp.
+        connections: [{lead: end1, to: D21}, {lead: end2, to: "UNO:D7"}]
+      - kind: wire
+        why: Pin 6 times the echo.
+        connections: [{lead: end1, to: D22}, {lead: end2, to: "UNO:D6"}]
+      - kind: wire
+        why: Grounds the sensor.
+        connections: [{lead: end1, to: D23}, {lead: end2, to: "RAIL:N-"}]
+      - kind: place
+        ref: BZ1
+        why: The beeper.
+        connections: [{lead: positive, to: E10}, {lead: negative, to: E11}]
+      - kind: wire
+        why: Pin 8 switches the beeper.
+        connections: [{lead: end1, to: "UNO:D8"}, {lead: end2, to: D10}]
+      - kind: wire
+        why: Grounds the beeper.
+        connections: [{lead: end1, to: D11}, {lead: end2, to: "RAIL:N-"}]
+      - kind: place
+        ref: LED1
+        why: A warning light.
+        connections: [{lead: anode, to: E5}, {lead: cathode, to: E6}]
+      - kind: place
+        ref: R1
+        why: Limits the LED current.
+        connections: [{lead: end1, to: D6}, {lead: end2, to: "RAIL:N-"}]
+      - kind: wire
+        why: Pin 9 switches the warning light.
+        connections: [{lead: end1, to: "UNO:D9"}, {lead: end2, to: D5}]
+    libraries: []
+    test: {type: serial, key: dist, expect: varies, instruction: Move your hand slowly toward the sensor's eyes, then away.}
+    sketch: |
+      const int TRIG = 7, ECHO = 6, BUZZER = 8, LED = 9;
+      long readCm() {
+        digitalWrite(TRIG, LOW); delayMicroseconds(2);
+        digitalWrite(TRIG, HIGH); delayMicroseconds(10);
+        digitalWrite(TRIG, LOW);
+        long us = pulseIn(ECHO, HIGH, 30000);
+        return us == 0 ? 0 : us / 58;
+      }
+      void setup() {
+        pinMode(TRIG, OUTPUT); pinMode(ECHO, INPUT);
+        pinMode(BUZZER, OUTPUT); pinMode(LED, OUTPUT);
+        Serial.begin(9600);
+      }
+      void loop() {
+        long cm = readCm();
+        Serial.print("dist=");
+        Serial.println(cm);
+        if (cm > 0 && cm < 60) {
+          digitalWrite(BUZZER, HIGH); digitalWrite(LED, HIGH);
+          delay(40);
+          digitalWrite(BUZZER, LOW); digitalWrite(LED, LOW);
+          delay(cm * 6);
+        } else {
+          delay(100);
+        }
+      }
+
+  - id: servo_knob
+    title: Knob-controlled servo
+    difficulty: advanced
+    keywords: [servo, motor, arm, knob, turn, rotate, steer, robot]
+    summary: Turn the knob and the servo arm follows it, like a remote-control steering wheel.
+    parts:
+      - {ref: POT1, part: potentiometer}
+      - {ref: M1, part: servo}
+    steps:
+      - kind: wire
+        why: Brings 5 volts to the plus rail.
+        connections: [{lead: end1, to: "UNO:5V"}, {lead: end2, to: "RAIL:N+"}]
+      - kind: wire
+        why: Brings ground to the minus rail.
+        connections: [{lead: end1, to: "UNO:GND"}, {lead: end2, to: "RAIL:N-"}]
+      - kind: place
+        ref: POT1
+        why: The knob.
+        connections: [{lead: left, to: E20}, {lead: wiper, to: E21}, {lead: right, to: E22}]
+      - kind: wire
+        why: One end of the knob to 5 volts.
+        connections: [{lead: end1, to: D20}, {lead: end2, to: "RAIL:N+"}]
+      - kind: wire
+        why: The other end to ground.
+        connections: [{lead: end1, to: D22}, {lead: end2, to: "RAIL:N-"}]
+      - kind: wire
+        why: A0 reads the knob.
+        connections: [{lead: end1, to: D21}, {lead: end2, to: "UNO:A0"}]
+      - kind: place
+        ref: M1
+        why: The servo turns its arm to the angle pin 9 asks for.
+        connections: [{lead: GND, to: "RAIL:N-"}, {lead: VCC, to: "RAIL:N+"}, {lead: signal, to: "UNO:D9"}]
+    libraries: [Servo]
+    test: {type: serial, key: angle, expect: varies, instruction: Turn the knob and feel the servo arm follow it.}
+    sketch: |
+      #include <Servo.h>
+      Servo arm;
+      void setup() {
+        arm.attach(9);
+        Serial.begin(9600);
+      }
+      void loop() {
+        int angle = map(analogRead(A0), 0, 1023, 0, 180);
+        arm.write(angle);
+        Serial.print("angle=");
+        Serial.println(angle);
+        delay(50);
+      }
+
+  - id: motion_alarm
+    title: Motion alarm
+    difficulty: advanced
+    keywords: [motion, pir, movement, burglar, security, intruder, someone, walks]
+    summary: Sounds the buzzer and lights an LED when someone moves in front of the motion sensor.
+    parts:
+      - {ref: PIR1, part: pir_sensor}
+      - {ref: BZ1, part: buzzer_active}
+      - {ref: LED1, part: led_red}
+      - {ref: R1, part: resistor_220}
+    steps:
+      - kind: wire
+        why: Brings 5 volts to the plus rail.
+        connections: [{lead: end1, to: "UNO:5V"}, {lead: end2, to: "RAIL:N+"}]
+      - kind: wire
+        why: Brings ground to the minus rail.
+        connections: [{lead: end1, to: "UNO:GND"}, {lead: end2, to: "RAIL:N-"}]
+      - kind: place
+        ref: PIR1
+        why: The motion sensor sees body heat move.
+        connections: [{lead: VCC, to: "RAIL:N+"}, {lead: OUT, to: "UNO:D2"}, {lead: GND, to: "RAIL:N-"}]
+      - kind: place
+        ref: BZ1
+        why: The alarm sound.
+        connections: [{lead: positive, to: E10}, {lead: negative, to: E11}]
+      - kind: wire
+        why: Pin 8 switches the buzzer.
+        connections: [{lead: end1, to: "UNO:D8"}, {lead: end2, to: D10}]
+      - kind: wire
+        why: Grounds the buzzer.
+        connections: [{lead: end1, to: D11}, {lead: end2, to: "RAIL:N-"}]
+      - kind: place
+        ref: LED1
+        why: The alarm light.
+        connections: [{lead: anode, to: E15}, {lead: cathode, to: E16}]
+      - kind: place
+        ref: R1
+        why: Limits the LED current.
+        connections: [{lead: end1, to: D16}, {lead: end2, to: "RAIL:N-"}]
+      - kind: wire
+        why: Pin 9 switches the light.
+        connections: [{lead: end1, to: "UNO:D9"}, {lead: end2, to: D15}]
+    libraries: []
+    test: {type: serial, key: motion, expect: varies, instruction: Wave your hand in front of the white dome. It needs about thirty seconds to settle after power-up.}
+    sketch: |
+      const int PIR = 2, BUZZER = 8, LED = 9;
+      void setup() {
+        pinMode(PIR, INPUT);
+        pinMode(BUZZER, OUTPUT); pinMode(LED, OUTPUT);
+        Serial.begin(9600);
+      }
+      void loop() {
+        int motion = digitalRead(PIR);
+        digitalWrite(BUZZER, motion); digitalWrite(LED, motion);
+        Serial.print("motion=");
+        Serial.println(motion);
+        delay(150);
+      }
+
+  - id: tilt_alarm
+    title: Tilt alarm
+    difficulty: advanced
+    keywords: [tilt, tip, shake, knock, anti-theft, fall, earthquake]
+    summary: Beeps when the tilt switch is tipped over, like an anti-theft alarm on a box.
+    parts:
+      - {ref: TS1, part: tilt_switch}
+      - {ref: BZ1, part: buzzer_active}
+    steps:
+      - kind: wire
+        why: Brings ground to the minus rail.
+        connections: [{lead: end1, to: "UNO:GND"}, {lead: end2, to: "RAIL:N-"}]
+      - kind: place
+        ref: TS1
+        why: A little ball inside connects the legs when it's upright.
+        connections: [{lead: end1, to: E20}, {lead: end2, to: E21}]
+      - kind: wire
+        why: Pin 2 reads the switch.
+        connections: [{lead: end1, to: D20}, {lead: end2, to: "UNO:D2"}]
+      - kind: wire
+        why: The other leg to ground.
+        connections: [{lead: end1, to: D21}, {lead: end2, to: "RAIL:N-"}]
+      - kind: place
+        ref: BZ1
+        why: The alarm sound.
+        connections: [{lead: positive, to: E10}, {lead: negative, to: E11}]
+      - kind: wire
+        why: Pin 8 switches the buzzer.
+        connections: [{lead: end1, to: "UNO:D8"}, {lead: end2, to: D10}]
+      - kind: wire
+        why: Grounds the buzzer.
+        connections: [{lead: end1, to: D11}, {lead: end2, to: "RAIL:N-"}]
+    libraries: []
+    test: {type: serial, key: tilt, expect: varies, instruction: Gently tip the tilt switch over with a finger, then stand it back up.}
+    sketch: |
+      const int TILT = 2, BUZZER = 8;
+      void setup() {
+        pinMode(TILT, INPUT_PULLUP);
+        pinMode(BUZZER, OUTPUT);
+        Serial.begin(9600);
+      }
+      void loop() {
+        int tilted = digitalRead(TILT) == HIGH ? 1 : 0;
+        digitalWrite(BUZZER, tilted);
+        Serial.print("tilt=");
+        Serial.println(tilted);
+        delay(100);
+      }
+
+  - id: clap_light
+    title: Clap-activated light
+    difficulty: advanced
+    keywords: [clap, sound, noise, loud, microphone, voice, music]
+    summary: Clap your hands to switch the light on, and clap again to switch it off.
+    parts:
+      - {ref: MIC1, part: sound_sensor}
+      - {ref: LED1, part: led_blue}
+      - {ref: R1, part: resistor_220}
+    steps:
+      - kind: wire
+        why: Brings 5 volts to the plus rail.
+        connections: [{lead: end1, to: "UNO:5V"}, {lead: end2, to: "RAIL:N+"}]
+      - kind: wire
+        why: Brings ground to the minus rail.
+        connections: [{lead: end1, to: "UNO:GND"}, {lead: end2, to: "RAIL:N-"}]
+      - kind: place
+        ref: MIC1
+        why: The sound sensor turns noise into a voltage.
+        connections: [{lead: AO, to: "UNO:A0"}, {lead: GND, to: "RAIL:N-"}, {lead: VCC, to: "RAIL:N+"}, {lead: DO, to: "UNO:D2"}]
+      - kind: place
+        ref: LED1
+        why: The light.
+        connections: [{lead: anode, to: E10}, {lead: cathode, to: E11}]
+      - kind: place
+        ref: R1
+        why: Limits the LED current.
+        connections: [{lead: end1, to: D11}, {lead: end2, to: "RAIL:N-"}]
+      - kind: wire
+        why: Pin 9 switches the light.
+        connections: [{lead: end1, to: "UNO:D9"}, {lead: end2, to: D10}]
+    libraries: []
+    test: {type: serial, key: sound, expect: varies, instruction: Clap your hands once, close to the microphone.}
+    sketch: |
+      const int MIC = A0, LED = 9;
+      int baseline = 0;
+      bool on = false;
+      unsigned long lastClap = 0;
+      void setup() {
+        pinMode(LED, OUTPUT);
+        Serial.begin(9600);
+        long sum = 0;
+        for (int i = 0; i < 100; i++) { sum += analogRead(MIC); delay(2); }
+        baseline = sum / 100;
+      }
+      void loop() {
+        int peak = 0;
+        unsigned long start = millis();
+        while (millis() - start < 50) {
+          int v = abs(analogRead(MIC) - baseline);
+          if (v > peak) peak = v;
+        }
+        if (peak > 60 && millis() - lastClap > 400) {
+          on = !on;
+          lastClap = millis();
+          digitalWrite(LED, on ? HIGH : LOW);
+        }
+        Serial.print("sound=");
+        Serial.println(peak);
+      }
+
+  - id: mood_lamp
+    title: Colour-changing mood lamp
+    difficulty: advanced
+    keywords: [rgb, colour, color, mood, rainbow, lamp, hue]
+    summary: Turn the knob to sweep an RGB LED through every colour of the rainbow.
+    parts:
+      - {ref: RGB1, part: rgb_led}
+      - {ref: R1, part: resistor_220}
+      - {ref: R2, part: resistor_220}
+      - {ref: R3, part: resistor_220}
+      - {ref: POT1, part: potentiometer}
+    steps:
+      - kind: wire
+        why: Brings 5 volts to the plus rail.
+        connections: [{lead: end1, to: "UNO:5V"}, {lead: end2, to: "RAIL:N+"}]
+      - kind: wire
+        why: Brings ground to the minus rail.
+        connections: [{lead: end1, to: "UNO:GND"}, {lead: end2, to: "RAIL:N-"}]
+      - kind: place
+        ref: RGB1
+        why: Three LEDs in one bulb, sharing one ground leg.
+        connections: [{lead: red, to: E10}, {lead: cathode, to: E11}, {lead: green, to: E12}, {lead: blue, to: E13}]
+      - kind: wire
+        why: Grounds the shared leg.
+        connections: [{lead: end1, to: D11}, {lead: end2, to: "RAIL:N-"}]
+      - kind: place
+        ref: R1
+        why: The red resistor bridges the groove.
+        connections: [{lead: end1, to: D10}, {lead: end2, to: F10}]
+      - kind: place
+        ref: R2
+        why: The green resistor bridges the groove.
+        connections: [{lead: end1, to: D12}, {lead: end2, to: F12}]
+      - kind: place
+        ref: R3
+        why: The blue resistor bridges the groove.
+        connections: [{lead: end1, to: D13}, {lead: end2, to: F13}]
+      - kind: wire
+        why: Pin 9 drives red.
+        connections: [{lead: end1, to: G10}, {lead: end2, to: "UNO:D9"}]
+      - kind: wire
+        why: Pin 10 drives green.
+        connections: [{lead: end1, to: G12}, {lead: end2, to: "UNO:D10"}]
+      - kind: wire
+        why: Pin 11 drives blue.
+        connections: [{lead: end1, to: G13}, {lead: end2, to: "UNO:D11"}]
+      - kind: place
+        ref: POT1
+        why: The colour knob.
+        connections: [{lead: left, to: E20}, {lead: wiper, to: E21}, {lead: right, to: E22}]
+      - kind: wire
+        why: One end of the knob to 5 volts.
+        connections: [{lead: end1, to: D20}, {lead: end2, to: "RAIL:N+"}]
+      - kind: wire
+        why: The other end to ground.
+        connections: [{lead: end1, to: D22}, {lead: end2, to: "RAIL:N-"}]
+      - kind: wire
+        why: A0 reads the knob.
+        connections: [{lead: end1, to: D21}, {lead: end2, to: "UNO:A0"}]
+    libraries: []
+    test: {type: serial, key: hue, expect: varies, instruction: Turn the knob slowly to change the colour.}
+    sketch: |
+      const int RP = 9, GP = 10, BP = 11;
+      void setup() {
+        pinMode(RP, OUTPUT); pinMode(GP, OUTPUT); pinMode(BP, OUTPUT);
+        Serial.begin(9600);
+      }
+      void loop() {
+        int hue = map(analogRead(A0), 0, 1023, 0, 767);
+        int r, g, b;
+        if (hue < 256)      { r = 255 - hue; g = hue;       b = 0; }
+        else if (hue < 512) { r = 0;         g = 511 - hue; b = hue - 256; }
+        else                { r = hue - 512; g = 0;         b = 767 - hue; }
+        analogWrite(RP, r); analogWrite(GP, g); analogWrite(BP, b);
+        Serial.print("hue=");
+        Serial.println(hue);
+        delay(50);
+      }
+
+  - id: reaction_game
+    title: Reaction-time game
+    difficulty: advanced
+    keywords: [game, reaction, reflex, speed, fast, quick, timer, challenge]
+    summary: After a random wait it beeps and lights up; press the button as fast as you can and it tells you your time.
+    parts:
+      - {ref: SW1, part: button}
+      - {ref: LED1, part: led_green}
+      - {ref: R1, part: resistor_220}
+      - {ref: BZ1, part: buzzer_active}
+    steps:
+      - kind: wire
+        why: Brings ground to the minus rail.
+        connections: [{lead: end1, to: "UNO:GND"}, {lead: end2, to: "RAIL:N-"}]
+      - kind: place
+        ref: SW1
+        why: Your reaction button.
+        connections: [{lead: leg_a, to: E20}, {lead: leg_b, to: F22}]
+      - kind: wire
+        why: Pin 2 reads the button.
+        connections: [{lead: end1, to: D20}, {lead: end2, to: "UNO:D2"}]
+      - kind: wire
+        why: The other side of the button to ground.
+        connections: [{lead: end1, to: G22}, {lead: end2, to: "RAIL:N-"}]
+      - kind: place
+        ref: LED1
+        why: The go light.
+        connections: [{lead: anode, to: E10}, {lead: cathode, to: E11}]
+      - kind: place
+        ref: R1
+        why: Limits the LED current.
+        connections: [{lead: end1, to: D11}, {lead: end2, to: "RAIL:N-"}]
+      - kind: wire
+        why: Pin 9 switches the light.
+        connections: [{lead: end1, to: "UNO:D9"}, {lead: end2, to: D10}]
+      - kind: place
+        ref: BZ1
+        why: The go beep.
+        connections: [{lead: positive, to: E15}, {lead: negative, to: E16}]
+      - kind: wire
+        why: Pin 8 switches the beeper.
+        connections: [{lead: end1, to: "UNO:D8"}, {lead: end2, to: D15}]
+      - kind: wire
+        why: Grounds the beeper.
+        connections: [{lead: end1, to: D16}, {lead: end2, to: "RAIL:N-"}]
+    libraries: []
+    test: {type: serial, key: reaction, expect: present, instruction: Wait for the beep, then press the button as fast as you can.}
+    sketch: |
+      const int BUTTON = 2, BUZZER = 8, LED = 9;
+      void setup() {
+        pinMode(BUTTON, INPUT_PULLUP);
+        pinMode(BUZZER, OUTPUT); pinMode(LED, OUTPUT);
+        Serial.begin(9600);
+        randomSeed(analogRead(A5));
+      }
+      void loop() {
+        while (digitalRead(BUTTON) == LOW) delay(10);
+        unsigned long wait = millis() + random(1500, 4000);
+        while (millis() < wait) {
+          if (digitalRead(BUTTON) == LOW) { Serial.println("early=1"); delay(1000); return; }
+          Serial.println("waiting=1");
+          delay(100);
+        }
+        digitalWrite(LED, HIGH); digitalWrite(BUZZER, HIGH);
+        unsigned long start = millis();
+        while (digitalRead(BUTTON) == HIGH && millis() - start < 5000) {}
+        unsigned long ms = millis() - start;
+        digitalWrite(LED, LOW); digitalWrite(BUZZER, LOW);
+        Serial.print("reaction=");
+        Serial.println(ms);
+        delay(1500);
+      }
+
+  - id: water_alarm
+    title: Flood alarm
+    difficulty: advanced
+    keywords: [water, flood, leak, rain, wet, plant, level]
+    summary: Beeps when the water sensor gets wet, so you know about a leak or a full cup.
+    parts:
+      - {ref: WS1, part: water_sensor}
+      - {ref: BZ1, part: buzzer_active}
+    steps:
+      - kind: wire
+        why: Brings 5 volts to the plus rail.
+        connections: [{lead: end1, to: "UNO:5V"}, {lead: end2, to: "RAIL:N+"}]
+      - kind: wire
+        why: Brings ground to the minus rail.
+        connections: [{lead: end1, to: "UNO:GND"}, {lead: end2, to: "RAIL:N-"}]
+      - kind: place
+        ref: WS1
+        why: The metal stripes conduct more when wet.
+        connections: [{lead: S, to: "UNO:A0"}, {lead: VCC, to: "RAIL:N+"}, {lead: GND, to: "RAIL:N-"}]
+      - kind: place
+        ref: BZ1
+        why: The alarm sound.
+        connections: [{lead: positive, to: E10}, {lead: negative, to: E11}]
+      - kind: wire
+        why: Pin 8 switches the buzzer.
+        connections: [{lead: end1, to: "UNO:D8"}, {lead: end2, to: D10}]
+      - kind: wire
+        why: Grounds the buzzer.
+        connections: [{lead: end1, to: D11}, {lead: end2, to: "RAIL:N-"}]
+    libraries: []
+    test: {type: serial, key: water, expect: varies, instruction: Touch the striped end of the sensor with a wet finger, or dip it in a cup of water.}
+    sketch: |
+      const int SENSOR = A0, BUZZER = 8;
+      void setup() {
+        pinMode(BUZZER, OUTPUT);
+        Serial.begin(9600);
+      }
+      void loop() {
+        int water = analogRead(SENSOR);
+        digitalWrite(BUZZER, water > 300 ? HIGH : LOW);
+        Serial.print("water=");
+        Serial.println(water);
+        delay(150);
+      }
+
+  - id: light_theremin
+    title: Light theremin
+    difficulty: advanced
+    keywords: [music, theremin, instrument, tone, pitch, sound, song, play]
+    summary: A musical instrument you play by waving your hand over the light sensor; the pitch follows your hand.
+    parts:
+      - {ref: LDR1, part: photoresistor}
+      - {ref: R1, part: resistor_10k}
+      - {ref: BZ1, part: buzzer_passive}
+    steps:
+      - kind: wire
+        why: Brings 5 volts to the plus rail.
+        connections: [{lead: end1, to: "UNO:5V"}, {lead: end2, to: "RAIL:N+"}]
+      - kind: wire
+        why: Brings ground to the minus rail.
+        connections: [{lead: end1, to: "UNO:GND"}, {lead: end2, to: "RAIL:N-"}]
+      - kind: place
+        ref: LDR1
+        why: The light sensor you play.
+        connections: [{lead: end1, to: E15}, {lead: end2, to: E16}]
+      - kind: wire
+        why: Powers the light sensor.
+        connections: [{lead: end1, to: D15}, {lead: end2, to: "RAIL:N+"}]
+      - kind: place
+        ref: R1
+        why: With the sensor, makes a voltage that follows the light.
+        connections: [{lead: end1, to: D16}, {lead: end2, to: "RAIL:N-"}]
+      - kind: wire
+        why: A0 reads the light.
+        connections: [{lead: end1, to: C16}, {lead: end2, to: "UNO:A0"}]
+      - kind: place
+        ref: BZ1
+        why: The speaker. A passive buzzer can play any note.
+        connections: [{lead: positive, to: E10}, {lead: negative, to: E11}]
+      - kind: wire
+        why: Pin 8 plays the notes.
+        connections: [{lead: end1, to: "UNO:D8"}, {lead: end2, to: D10}]
+      - kind: wire
+        why: Grounds the speaker.
+        connections: [{lead: end1, to: D11}, {lead: end2, to: "RAIL:N-"}]
+    libraries: []
+    test: {type: serial, key: light, expect: varies, instruction: Move your hand up and down over the light sensor and listen to the pitch change.}
+    sketch: |
+      const int SENSOR = A0, SPEAKER = 8;
+      void setup() {
+        Serial.begin(9600);
+      }
+      void loop() {
+        int light = analogRead(SENSOR);
+        int pitch = map(light, 50, 950, 150, 1500);
+        tone(SPEAKER, constrain(pitch, 120, 2000));
+        Serial.print("light=");
+        Serial.println(light);
+        delay(30);
+      }
+
+  - id: joystick_servo
+    title: Joystick-steered servo
+    difficulty: advanced
+    keywords: [joystick, stick, steer, control, game controller, servo, pan, robot, arm]
+    summary: Push the joystick left and right and the servo arm swings to match.
+    parts:
+      - {ref: JS1, part: joystick}
+      - {ref: M1, part: servo}
+    steps:
+      - kind: wire
+        why: Brings 5 volts to the plus rail.
+        connections: [{lead: end1, to: "UNO:5V"}, {lead: end2, to: "RAIL:N+"}]
+      - kind: wire
+        why: Brings ground to the minus rail.
+        connections: [{lead: end1, to: "UNO:GND"}, {lead: end2, to: "RAIL:N-"}]
+      - kind: place
+        ref: JS1
+        why: The joystick gives two voltages for its left-right and up-down position, plus a click.
+        connections: [{lead: GND, to: "RAIL:N-"}, {lead: VCC, to: "RAIL:N+"}, {lead: VRx, to: "UNO:A0"}, {lead: VRy, to: "UNO:A1"}, {lead: SW, to: "UNO:D2"}]
+      - kind: place
+        ref: M1
+        why: The servo follows the stick.
+        connections: [{lead: GND, to: "RAIL:N-"}, {lead: VCC, to: "RAIL:N+"}, {lead: signal, to: "UNO:D9"}]
+    libraries: [Servo]
+    test: {type: serial, key: x, expect: varies, instruction: Push the joystick all the way left, then all the way right.}
+    sketch: |
+      #include <Servo.h>
+      Servo arm;
+      void setup() {
+        arm.attach(9);
+        pinMode(2, INPUT_PULLUP);
+        Serial.begin(9600);
+      }
+      void loop() {
+        int x = analogRead(A0);
+        arm.write(map(x, 0, 1023, 0, 180));
+        Serial.print("x=");
+        Serial.print(x);
+        Serial.print(" click=");
+        Serial.println(digitalRead(2) == LOW ? 1 : 0);
+        delay(40);
+      }

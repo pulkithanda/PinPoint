@@ -47,6 +47,14 @@ class CallTransport(ABC):
     def send_beep(self, wav: bytes) -> None:
         pass
 
+    def poll_barge_in(self) -> bool:
+        """True if the caller started talking since the last poll (so Pinpoint should stop)."""
+        return False
+
+    def stop_speech(self) -> None:
+        """Stop the sentence being played and drop queued ones."""
+        pass
+
     def send_video_frame(self, frame_bgr: np.ndarray) -> None:
         pass
 

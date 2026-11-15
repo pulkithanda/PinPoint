@@ -28,7 +28,6 @@ from backend.config import Settings
 log = logging.getLogger("pinpoint.agent")
 
 AGENT_NAME = os.environ.get("AGENT_NAME", "pinpoint")
-BRIDGE_READY_WAIT_S = 45.0
 
 
 def bridge_ready(metadata: str | None) -> bool:
@@ -38,14 +37,40 @@ def bridge_ready(metadata: str | None) -> bool:
         return False
 
 
+async def wait_for_bridge_ready(ready: asyncio.Event, ended: asyncio.Event) -> bool:
+    """True once FaceTime is ready, False if the call ends first.
+
+    No timeout on purpose: Chert's 10 s silence timer starts at bridge_ready, not when the
+    bridge joins, and FaceTime can take longer than that to connect. Greeting before the
+    signal goes into a call that isn't live yet, then the silence after it ends the call
+    (`chert guide agent`, rule 4: "Without the signal, do not greet.").
+    """
+    if ready.is_set():
+        return True
+    r = asyncio.ensure_future(ready.wait())
+    e = asyncio.ensure_future(ended.wait())
+    try:
+        await asyncio.wait({r, e}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        r.cancel()
+        e.cancel()
+    return ready.is_set()
+
+
 def _build_session(room, project: str):
     """Heavy setup (MediaPipe, TTS cache, Claude client). Runs in a worker thread."""
     from backend import chert_adapter
     from backend.livekit_transport import LiveKitTransport
-    from backend.session import Session
 
     s = Settings()
     transport = LiveKitTransport.for_room(room, stt_model=s.stt_model, messaging=chert_adapter.Messaging())
+    if s.kit == "elegoo":
+        from backend.build_session import BuildSession
+
+        return transport, BuildSession(transport, s)
+
+    from backend.session import Session
+
     session = Session(transport, s, project)
     # Render the opening lines first, so the greeting is instant when FaceTime is ready.
     try:
@@ -103,13 +128,14 @@ async def entrypoint(ctx) -> None:
         return
     gone.cancel()
     caller = waiter.result()
-    log.info("Caller joined: %s", caller.identity)
+    log.info("Caller joined: %s (kind=%s)", caller.identity, caller.kind)
     on_metadata()  # the signal may have arrived before we listened
-    try:
-        await asyncio.wait_for(ready.wait(), BRIDGE_READY_WAIT_S)
-        log.info("FaceTime is ready: greeting")
-    except asyncio.TimeoutError:
-        log.warning("No chert_bridge_ready after %.0f s; starting anyway", BRIDGE_READY_WAIT_S)
+    log.info("Waiting for chert_bridge_ready (FaceTime connecting)")
+    if not await wait_for_bridge_ready(ready, ended):
+        log.info("Call ended before FaceTime was ready")
+        ctx.shutdown("call ended before bridge_ready")
+        return
+    log.info("FaceTime is ready: greeting")
 
     with web._lock:
         old = web.STATE.get("session")
@@ -117,6 +143,7 @@ async def entrypoint(ctx) -> None:
             old.stop()
         web.STATE["session"] = session
     session.start()  # greets, then runs the build guidance loop in its own thread
+    log.info("Pinpoint call session started")
 
     await ended.wait()
     log.info("Call over: shutting the job down")
@@ -141,14 +168,29 @@ def _warm_tts(project: str) -> None:
 
     s = Settings()
     tts = TTSWorker.shared(ROOT / "cache" / "tts", speak_locally=False)
-    layout = ShieldLayout.load(s.layout_path)
-    engine = GuidanceEngine(Project.load(s.projects_dir / f"{project}.yaml"), layout, mode=s.mode)
-    phrases = [a.text for a in engine.start() if getattr(a, "text", None)] + common_phrases(list(layout.ports))
+    if s.kit == "elegoo":
+        from backend.build_session import fixed_phrases
+
+        phrases = fixed_phrases(s.mode)
+        opening = phrases[:1]
+    else:
+        layout = ShieldLayout.load(s.layout_path)
+        engine = GuidanceEngine(Project.load(s.projects_dir / f"{project}.yaml"), layout, mode=s.mode)
+        opening = [a.text for a in engine.start() if getattr(a, "text", None)]
+        phrases = opening + common_phrases(list(layout.ports))
     todo = [p for p in phrases if not tts.clip_path(p).exists()]
     if todo:
         print(f"Preparing {len(todo)} speech clips (first run only)...", flush=True)
     for p in todo:
         tts.render(p, timeout_s=15.0)
+    missing_opening = [p for p in opening
+                       if not tts.clip_path(p).is_file() or tts.clip_path(p).stat().st_size == 0]
+    if missing_opening:
+        raise RuntimeError(
+            "Pinpoint could not prepare its opening speech, so Chert would hear silence. "
+            "On Ubuntu/Debian install eSpeak NG with "
+            "`sudo apt-get update && sudo apt-get install -y espeak-ng`, then restart."
+        )
 
 
 def run() -> None:
@@ -156,9 +198,20 @@ def run() -> None:
 
     from livekit.agents import WorkerOptions, cli
 
-    from backend import main as web
+    from backend import chert_adapter, config, main as web
+
+    log.info("Pinpoint config root: %s (.env %s)", config.ROOT,
+             "present" if (config.ROOT / ".env").is_file() else "not found")
+    log.info("LiveKit settings loaded: URL=%s API key=%s API secret=%s",
+             bool(chert_adapter.LIVEKIT_URL), bool(chert_adapter.LIVEKIT_API_KEY),
+             bool(chert_adapter.LIVEKIT_API_SECRET))
 
     if len(sys.argv) == 1 or sys.argv[1] in ("start", "dev"):
+        model = Settings().gesture_model
+        from backend.vision.hands import ensure_gesture_model, ensure_mediapipe_runtime
+
+        ensure_mediapipe_runtime()
+        ensure_gesture_model(model)
         _warm_tts(web.STATE["project"])
 
     port = int(os.environ.get("PINPOINT_DASHBOARD_PORT", "8000"))

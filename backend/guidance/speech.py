@@ -51,6 +51,15 @@ class SpeechScheduler:
             self.pending_steer = None
             self.queue.append(say)
 
+    def clear(self) -> None:
+        """The caller interrupted: forget everything not yet said."""
+        self.queue.clear()
+        self.pending_steer = None
+
+    @property
+    def pending(self) -> bool:
+        return bool(self.queue) or self.pending_steer is not None
+
     def pop_ready(self, now: float, busy: bool = False) -> Say | None:
         if busy:
             return None
@@ -108,6 +117,51 @@ def _sapi_renderer():
     return render
 
 
+def _neural_renderer():
+    """Natural-sounding Microsoft neural voice via the `edge-tts` package (online, free, no key).
+    Returns None if the package isn't installed or PINPOINT_VOICE=sapi, so the offline Windows
+    voice is used instead. Any failure on a clip also falls back to the offline voice."""
+    import os
+
+    voice = os.environ.get("PINPOINT_VOICE", "en-US-AvaNeural").strip()
+    if not voice or voice.lower() in ("sapi", "off", "none"):
+        return None
+    try:
+        import asyncio
+
+        import av
+        import edge_tts
+    except ImportError:
+        log.info("edge-tts not installed: using the offline Windows voice (pip install edge-tts for a natural one)")
+        return None
+    rate = os.environ.get("PINPOINT_VOICE_RATE", "+8%")
+
+    def render(text: str, path: Path) -> None:
+        mp3 = path.with_suffix(".tmp.mp3")
+        asyncio.run(asyncio.wait_for(edge_tts.Communicate(text, voice, rate=rate).save(str(mp3)), timeout=8.0))
+        try:
+            pcm = []
+            with av.open(str(mp3)) as container:
+                resampler = av.AudioResampler(format="s16", layout="mono", rate=24000)
+                for frame in container.decode(audio=0):
+                    for out in resampler.resample(frame):
+                        pcm.append(out.to_ndarray().reshape(-1))
+            data = np.concatenate(pcm).astype(np.int16) if pcm else np.zeros(0, np.int16)
+            tmp = path.with_suffix(".tmp.wav")
+            with wave.open(str(tmp), "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(24000)
+                w.writeframes(data.tobytes())
+            tmp.replace(path)
+        finally:
+            mp3.unlink(missing_ok=True)
+
+    log.info("Using the neural voice %s", voice)
+    render.voice = voice  # type: ignore[attr-defined]
+    return render
+
+
 class TTSWorker:
     """Single thread that owns the pyttsx3 engine; speaks locally and/or renders WAV clips."""
 
@@ -129,6 +183,7 @@ class TTSWorker:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.rate_wpm = rate_wpm
         self.speak_locally = speak_locally
+        self._neural = _neural_renderer() if not speak_locally else None
         self.jobs: queue.Queue = queue.Queue()
         self.busy = False
         self._thread = threading.Thread(target=self._run, name="tts", daemon=True)
@@ -144,6 +199,7 @@ class TTSWorker:
             log.warning("pyttsx3 unavailable (%s); speech will be printed only", e)
             engine = None
         sapi = _sapi_renderer()  # Windows: pyttsx3's save_to_file hangs after the first clip
+        neural = self._neural
         while True:
             kind, text, reply = self.jobs.get()
             try:
@@ -155,6 +211,12 @@ class TTSWorker:
                         engine.runAndWait()
                 elif kind == "render":
                     path = self.clip_path(text)
+                    if not path.exists() and neural is not None:
+                        try:
+                            neural(text, path)
+                        except Exception as e:  # offline, blocked or slow: the robot voice beats silence
+                            log.warning("Neural voice failed (%s); using the offline voice for this line", e)
+                            path = self._fallback_path(text)
                     if not path.exists() and sapi is not None:
                         sapi(text, path)
                     elif not path.exists() and engine is not None:
@@ -169,6 +231,11 @@ class TTSWorker:
                 self.busy = False
 
     def clip_path(self, text: str) -> Path:
+        # Clips from different voices never mix in the cache.
+        key = f"{getattr(self._neural, 'voice', 'sapi')}|{text}" if self._neural is not None else text
+        return self.cache_dir / (hashlib.sha1(key.encode()).hexdigest()[:16] + ".wav")
+
+    def _fallback_path(self, text: str) -> Path:
         return self.cache_dir / (hashlib.sha1(text.encode()).hexdigest()[:16] + ".wav")
 
     def say(self, text: str) -> None:

@@ -40,6 +40,9 @@ class UtteranceSegmenter:
         self._buf: list[np.ndarray] = []
         self._speech_s = 0.0
         self._silence_s = 0.0
+        self._loud_run_s = 0.0
+        self.barge_in_s = 0.35        # this much continuous speech counts as the caller starting to talk
+        self.speech_started = False   # set once per utterance when barge_in_s is reached; caller clears it
 
     def feed(self, pcm16: np.ndarray, rate: int) -> np.ndarray | None:
         x = to_float_16k(pcm16, rate)
@@ -51,7 +54,13 @@ class UtteranceSegmenter:
             self._buf.append(x)
             self._speech_s += dur
             self._silence_s = 0.0
-        elif self._buf:
+            before = self._loud_run_s
+            self._loud_run_s += dur
+            if before < self.barge_in_s <= self._loud_run_s:
+                self.speech_started = True
+        else:
+            self._loud_run_s = 0.0
+        if not loud and self._buf:
             self._buf.append(x)  # keep trailing silence so words aren't clipped
             self._silence_s += dur
         total = sum(len(b) for b in self._buf) / WHISPER_RATE
@@ -65,8 +74,10 @@ class UtteranceSegmenter:
 class Transcriber:
     """Background faster-whisper worker. Call feed_pcm() with audio; on_text(text) fires per utterance."""
 
-    def __init__(self, on_text: Callable[[str], None], model: str = "base.en"):
+    def __init__(self, on_text: Callable[[str], None], model: str = "base.en",
+                 on_speech_start: Callable[[], None] | None = None):
         self.on_text = on_text
+        self.on_speech_start = on_speech_start
         self.model_name = model
         self.segmenter = UtteranceSegmenter()
         self._q: queue.Queue[np.ndarray] = queue.Queue()
@@ -74,6 +85,10 @@ class Transcriber:
 
     def feed_pcm(self, pcm16: np.ndarray, rate: int) -> None:
         utt = self.segmenter.feed(pcm16, rate)
+        if self.segmenter.speech_started:
+            self.segmenter.speech_started = False
+            if self.on_speech_start is not None:
+                self.on_speech_start()
         if utt is not None:
             self._q.put(utt)
 

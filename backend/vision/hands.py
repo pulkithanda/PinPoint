@@ -7,6 +7,11 @@ debounces gestures (thumbs-up = next, open palm = repeat in visual mode).
 """
 from __future__ import annotations
 
+import ctypes
+import sys
+import tempfile
+import urllib.error
+import urllib.request
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +25,52 @@ GESTURE_MODEL_URL = (
 )
 
 
+def ensure_mediapipe_runtime() -> None:
+    if not sys.platform.startswith("linux"):
+        return
+    missing = []
+    for library in ("libEGL.so.1", "libGLESv2.so.2"):
+        try:
+            ctypes.CDLL(library)
+        except OSError:
+            missing.append(library)
+    if missing:
+        raise RuntimeError(
+            f"MediaPipe cannot load Linux graphics libraries: {', '.join(missing)}. "
+            "On Ubuntu/Debian install them with "
+            "`sudo apt-get update && sudo apt-get install -y libegl1 libgles2`, "
+            "then restart the Pinpoint agent."
+        )
+
+
+def ensure_gesture_model(model_path: str | Path) -> Path:
+    model_path = Path(model_path)
+    if model_path.is_file() and model_path.stat().st_size > 0:
+        return model_path
+
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        dir=model_path.parent, prefix=f".{model_path.name}.", suffix=".download", delete=False
+    ) as temp_file:
+        temp_path = Path(temp_file.name)
+
+    try:
+        print(f"Downloading MediaPipe hand-tracking model to {model_path}...", flush=True)
+        urllib.request.urlretrieve(GESTURE_MODEL_URL, temp_path)
+        if temp_path.stat().st_size == 0:
+            raise RuntimeError(f"Downloaded MediaPipe model is empty: {temp_path}")
+        temp_path.replace(model_path)
+    except (OSError, urllib.error.URLError) as exc:
+        raise RuntimeError(
+            f"Could not download the MediaPipe model to {model_path}; "
+            "check network access or run `python -m tools.download_models`."
+        ) from exc
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+    return model_path
+
+
 @dataclass
 class HandObservation:
     fingertip_px: tuple[float, float]
@@ -31,15 +82,12 @@ class HandObservation:
 
 class HandTracker:
     def __init__(self, model_path: str | Path, fingertip_landmark: int = 8, num_hands: int = 2):
+        ensure_mediapipe_runtime()
         import mediapipe as mp
         from mediapipe.tasks import python as mp_python
         from mediapipe.tasks.python import vision as mp_vision
 
-        model_path = Path(model_path)
-        if not model_path.exists():
-            raise FileNotFoundError(
-                f"MediaPipe model not found at {model_path}. Run: python -m tools.download_models"
-            )
+        model_path = ensure_gesture_model(model_path)
         self._mp = mp
         options = mp_vision.GestureRecognizerOptions(
             base_options=mp_python.BaseOptions(model_asset_path=str(model_path)),

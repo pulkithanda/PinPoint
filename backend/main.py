@@ -38,17 +38,25 @@ def _replace_session(make) -> None:
         STATE["session"] = make()
 
 
-def _webcam_session() -> Session:
+def _make_session(transport, s: Settings):
+    if s.kit == "elegoo":
+        from backend.build_session import BuildSession
+
+        return BuildSession(transport, s).start()
+    return Session(transport, s, STATE["project"]).start()
+
+
+def _webcam_session():
     s = Settings()
-    return Session(WebcamTransport(s.camera_index), s, STATE["project"]).start()
+    return _make_session(WebcamTransport(s.camera_index), s)
 
 
-def _call_session(call: chert_adapter.IncomingCall) -> Session:
+def _call_session(call: chert_adapter.IncomingCall):
     s = Settings()
     transport = LiveKitTransport(chert_adapter.LIVEKIT_URL, call.agent_token, stt_model=s.stt_model,
                                  messaging=STATE["messaging"], bridge_identity=call.bridge_identity,
                                  agent_identity=chert_adapter.AGENT_IDENTITY)
-    return Session(transport, s, STATE["project"]).start()
+    return _make_session(transport, s)
 
 
 @app.on_event("startup")

@@ -67,6 +67,91 @@ _SYSTEM = (
 )
 
 
+_BB_SYSTEM = (
+    "You are the eyes of Pinpoint, a build coach that guides blind and Deaf makers through wiring an Arduino UNO "
+    "and an 830-hole breadboard by touch. Breadboard holes are named by column letter A-J and row number 1-63 "
+    "(e.g. E10); A-E and F-J are separated by a central groove; the plus and minus rails run along each long "
+    "edge. Answer only from what is visible. A wrong 'correct' misleads a blind builder, so say 'unsure' "
+    "rather than guess."
+)
+
+
+@dataclass
+class BoardSetup:
+    near_half: str | None        # "AE" | "FJ": which half of the breadboard is nearest the builder
+    row1_end: str | None         # "left" | "right"
+    near_outer_rail: str | None  # "+" | "-": the rail strip right at the builder's edge
+    usb_left: bool | None        # Arduino USB socket points left
+    description: str
+    board_visible: bool | None = None     # a breadboard is in the photo at all
+    long_side_toward: bool | None = None  # the breadboard's long side runs along the builder's edge
+    fix: str = ""                         # what to move, in the builder's words, if the layout is wrong
+
+
+@dataclass
+class PlacementCheck:
+    ok: bool | None              # None = couldn't tell
+    problem: str                 # spoken fix if wrong
+    seen: str
+
+
+@dataclass
+class BoardReview:
+    ok: bool | None
+    problems: list[str]
+    description: str
+
+
+_SETUP_PROMPT = (
+    "The builder has put a breadboard and an Arduino UNO on the table and holds the phone above them. The phone "
+    "may be held any way round, so the photo may be rotated: do NOT use the image edges to decide directions. "
+    "Wanted layout: the Arduino sits alongside one LONG side of the breadboard (not at a short end), and the "
+    "builder sits at the OTHER long side, facing the Arduino across the breadboard. Seen from the builder's seat, "
+    "the Arduino's USB socket points to the builder's LEFT. "
+    "Work out the builder's seat from where the Arduino is (opposite long side), then answer from the builder's "
+    "point of view: is the layout as wanted? Which half of the breadboard is nearest the builder (A-E or F-J, "
+    "from the printed letters)? Is row 1 at the builder's left or right? Along the builder's long edge, is the "
+    "outermost rail strip plus (red line) or minus (blue line)? "
+    "If the layout is wrong, `fix` says in one or two short, friendly spoken sentences what to move, in the "
+    "builder's terms (e.g. 'Turn the Arduino round so its USB socket points to your left.'). Otherwise `fix` "
+    "is empty."
+)
+_SETUP_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "near_half": {"type": "string", "enum": ["AE", "FJ", "unsure"]},
+        "row1_end": {"type": "string", "enum": ["left", "right", "unsure"]},
+        "near_outer_rail": {"type": "string", "enum": ["+", "-", "unsure"]},
+        "board_visible": {"type": "boolean", "description": "Both a breadboard and an Arduino are in the photo."},
+        "layout_ok": {"type": "boolean", "description": "The layout matches what's wanted."},
+        "fix": {"type": "string"},
+        "description": {"type": "string"},
+    },
+    "required": ["near_half", "row1_end", "near_outer_rail", "board_visible", "layout_ok", "fix", "description"],
+    "additionalProperties": False,
+}
+_PLACEMENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "status": {"type": "string", "enum": ["correct", "wrong", "unsure"]},
+        "problem": {"type": "string", "description": "If wrong: one or two short spoken sentences on what to fix. Else empty."},
+        "seen": {"type": "string", "description": "One short sentence: what you see."},
+    },
+    "required": ["status", "problem", "seen"],
+    "additionalProperties": False,
+}
+_REVIEW_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verdict": {"type": "string", "enum": ["looks_right", "has_problems", "unsure"]},
+        "problems": {"type": "array", "items": {"type": "string"}},
+        "description": {"type": "string"},
+    },
+    "required": ["verdict", "problems", "description"],
+    "additionalProperties": False,
+}
+
+
 def encode_jpeg(frame_bgr: np.ndarray, max_side: int = 1024, quality: int = 85) -> str:
     h, w = frame_bgr.shape[:2]
     scale = min(1.0, max_side / max(h, w))
@@ -100,7 +185,8 @@ class Verifier:
         save = os.environ.get("PINPOINT_SAVE_CLAUDE_CALLS", "1").strip().lower() not in ("0", "false", "no", "off")
         self.call_dir = (Path(__file__).resolve().parents[2] / "cache" / "claude_calls") if save else None
 
-    def _record(self, kind: str, image_b64: str, prompt: str, schema: dict | None, resp, answer) -> None:
+    def _record(self, kind: str, image_b64: str, prompt: str, schema: dict | None, resp, answer,
+                system: str = _SYSTEM) -> None:
         u = getattr(resp, "usage", None)
         tin = (getattr(u, "input_tokens", 0) or 0) + (getattr(u, "cache_read_input_tokens", 0) or 0) \
             + (getattr(u, "cache_creation_input_tokens", 0) or 0)
@@ -119,13 +205,14 @@ class Verifier:
             stem = self.call_dir / f"{time.strftime('%Y%m%d-%H%M%S')}-{int(time.time() * 1000) % 1000:03d}-{kind}"
             stem.with_suffix(".jpg").write_bytes(base64.standard_b64decode(image_b64))
             stem.with_suffix(".json").write_text(json.dumps({
-                "kind": kind, "model": self.model, "effort": self.effort, "system": _SYSTEM, "prompt": prompt,
+                "kind": kind, "model": self.model, "effort": self.effort, "system": system, "prompt": prompt,
                 "schema": schema, "answer": answer, "input_tokens": tin, "output_tokens": tout,
             }, indent=2), encoding="utf-8")
         except OSError as e:
             log.warning("Could not save the Claude call record: %s", e)
 
-    def _ask(self, image_b64: str, prompt: str, schema: dict | None, kind: str = "call") -> dict | str | None:
+    def _ask(self, image_b64: str, prompt: str, schema: dict | None, kind: str = "call",
+             system: str = _SYSTEM) -> dict | str | None:
         """One image + prompt. Returns parsed JSON if `schema` is given, else plain text."""
         a = self._anthropic
         output_config: dict = {"effort": self.effort}
@@ -135,7 +222,7 @@ class Verifier:
             resp = self.client.beta.messages.create(
                 model=self.model,
                 max_tokens=2048,
-                system=_SYSTEM,
+                system=system,
                 betas=["server-side-fallback-2026-07-01"],
                 fallbacks="default",  # re-route on a safety-classifier refusal instead of failing the check
                 output_config=output_config,
@@ -158,7 +245,7 @@ class Verifier:
             return None
         if resp.stop_reason == "refusal":
             log.warning("Claude declined the verification request")
-            self._record(kind, image_b64, prompt, schema, resp, None)
+            self._record(kind, image_b64, prompt, schema, resp, None, system)
             return None
         text = "".join(b.text for b in resp.content if b.type == "text")
         if schema is None:
@@ -169,8 +256,74 @@ class Verifier:
             except json.JSONDecodeError:
                 log.error("Claude returned non-JSON: %r", text[:200])
                 out = None
-        self._record(kind, image_b64, prompt, schema, resp, out)
+        self._record(kind, image_b64, prompt, schema, resp, out, system)
         return out
+
+    # ------------------------------------------------------------ breadboard (Elegoo kit)
+    def check_board_setup(self, frame_bgr: np.ndarray) -> BoardSetup:
+        out = self._ask(encode_jpeg(frame_bgr, max_side=1280), _SETUP_PROMPT, _SETUP_SCHEMA, kind="setup",
+                        system=_BB_SYSTEM)
+        if not isinstance(out, dict):
+            return BoardSetup(None, None, None, None, "verification unavailable")
+        def pick(key, allowed):
+            v = out.get(key)
+            return v if v in allowed else None
+        def flag(key):
+            return out.get(key) if isinstance(out.get(key), bool) else None
+        ok = flag("layout_ok")
+        return BoardSetup(pick("near_half", ("AE", "FJ")), pick("row1_end", ("left", "right")),
+                          pick("near_outer_rail", ("+", "-")), ok, out.get("description", ""),
+                          flag("board_visible"), ok, (out.get("fix") or "").strip())
+
+    def check_placement(self, frame_bgr: np.ndarray, expected: str, already: str, mode: str = "voice") -> PlacementCheck:
+        audience = ("Say any problem as a blind builder can act on it: by touch and position (which leg, which "
+                    "row, which side of the groove), never by colour alone."
+                    if mode != "visual" else "Say any problem in one short caption.")
+        prompt = (
+            "Check one step of a breadboard build. The photo is taken from above with the top of the image "
+            "pointing away from the builder.\n"
+            f"Expected for this step:\n{expected}\n"
+            + (f"Already built earlier (context only, don't judge):\n{already}\n" if already else "")
+            + "Are this step's part and leads in exactly those holes, the right way round? Count rows from the "
+            "printed numbers on the breadboard. " + audience
+        )
+        out = self._ask(encode_jpeg(frame_bgr, max_side=1568), prompt, _PLACEMENT_SCHEMA, kind="placement",
+                        system=_BB_SYSTEM)
+        if not isinstance(out, dict):
+            return PlacementCheck(None, "", "verification unavailable")
+        ok = {"correct": True, "wrong": False}.get(out.get("status", "unsure"))
+        return PlacementCheck(ok, out.get("problem", "") or "", out.get("seen", "") or "")
+
+    def review_board(self, frame_bgr: np.ndarray, expected: str, mode: str = "voice") -> BoardReview:
+        prompt = (
+            "Final check before the code is uploaded. Photo from above, top of the image pointing away from the "
+            f"builder. The finished circuit should be exactly:\n{expected}\n"
+            "List each difference you can actually see (wrong hole, missing wire, LED or buzzer backwards, wire to "
+            "the wrong Arduino pin). Ignore jumper wire colours and routing. If something can't be seen clearly, "
+            "don't list it."
+            + (" Describe each problem by touch and position for a blind builder." if mode != "visual" else "")
+        )
+        out = self._ask(encode_jpeg(frame_bgr, max_side=1568), prompt, _REVIEW_SCHEMA, kind="review",
+                        system=_BB_SYSTEM)
+        if not isinstance(out, dict):
+            return BoardReview(None, [], "verification unavailable")
+        issues = [i for i in (out.get("problems") or []) if isinstance(i, str) and i.strip()]
+        verdict = {"looks_right": True, "has_problems": False}.get(out.get("verdict", "unsure"))
+        if verdict is False and not issues:
+            verdict = None
+        return BoardReview(verdict, issues, out.get("description", "") or "")
+
+    def identify_part(self, frame_bgr: np.ndarray, candidates: dict[str, str]) -> ModuleID:
+        """`candidates`: part id -> description. Reads resistor colour bands too."""
+        listing = "\n".join(f"- {k}: {v}" for k, v in candidates.items())
+        prompt = ("The builder is holding up an electronic part. Which one is it? For resistors, read the colour "
+                  "bands (220 ohm = red red brown; 1k = brown black red; 10k = brown black orange; a fourth band "
+                  "may be gold).\n" + listing + "\nAnswer with one id exactly, or 'unknown'.")
+        out = self._ask(encode_jpeg(frame_bgr), prompt, _MODULE_SCHEMA, kind="identify", system=_BB_SYSTEM)
+        if not isinstance(out, dict):
+            return ModuleID("unknown", False, "verification unavailable")
+        name = out.get("module", "unknown")
+        return ModuleID(name if name in candidates else "unknown", bool(out.get("confident")), out.get("description", ""))
 
     def identify_module(self, frame_bgr: np.ndarray, candidates: list[str]) -> ModuleID:
         prompt = (

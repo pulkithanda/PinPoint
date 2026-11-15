@@ -81,3 +81,19 @@ def test_dotenv_inline_comments(tmp_path, monkeypatch):
         monkeypatch.delenv(k, raising=False)
     cfg._load_dotenv()
     assert (os.environ["PT_A"], os.environ["PT_B"], os.environ["PT_C"]) == ("0", "a # b", "x")
+
+
+def test_dotenv_replaces_blank_environment_values_and_ignores_comment_values(tmp_path, monkeypatch):
+    import backend.config as cfg
+
+    (tmp_path / ".env").write_text(
+        "PT_D=from-file\nPT_E=       # placeholder\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(cfg, "ROOT", tmp_path)
+    monkeypatch.setenv("PT_D", "")
+    monkeypatch.setenv("PT_E", "")
+
+    cfg._load_dotenv()
+
+    assert os.environ["PT_D"] == "from-file"
+    assert os.environ["PT_E"] == ""

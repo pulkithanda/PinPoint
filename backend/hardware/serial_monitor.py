@@ -70,6 +70,7 @@ class SerialMonitor:
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="serial", daemon=True)
         self._lock = threading.Lock()
+        self._paused = False
 
     # -- lifecycle --
     def start(self) -> "SerialMonitor":
@@ -97,6 +98,9 @@ class SerialMonitor:
         import serial
 
         while not self._stop.is_set():
+            if self._paused:
+                time.sleep(0.3)
+                continue
             device = self.port if self.port.lower() != "auto" else self.find_port()
             if not device:
                 time.sleep(1.0)
@@ -105,7 +109,7 @@ class SerialMonitor:
                 with serial.Serial(device, self.baud, timeout=0.5) as ser:
                     log.info("Serial connected on %s", device)
                     self._ser = ser
-                    while not self._stop.is_set():
+                    while not self._stop.is_set() and not self._paused:
                         raw = ser.readline()
                         if raw:
                             self.feed(raw.decode("ascii", errors="ignore"))
@@ -117,9 +121,37 @@ class SerialMonitor:
             time.sleep(1.0)
 
     # -- data --
+    def pause(self) -> None:
+        """Release the COM port (e.g. so arduino-cli can upload). Windows allows only one opener."""
+        self._paused = True
+        ser = self._ser
+        if ser is not None:
+            try:
+                ser.close()
+            except Exception:  # noqa: BLE001 - closing a port that just vanished is fine
+                pass
+
+    def resume(self) -> None:
+        with self._lock:
+            self.samples.clear()
+            self._first_rx = None
+        self._paused = False
+
+    def values(self, key: str, now: float | None = None, window_s: float | None = None) -> list[int]:
+        """Recent integer readings of `key` (any key=value the sketch prints)."""
+        now = time.monotonic() if now is None else now
+        w = self.window_s if window_s is None else window_s
+        with self._lock:
+            return [v[key] for t, v in self.samples if now - t <= w and key in v]
+
+    def receiving(self, now: float | None = None) -> bool:
+        now = time.monotonic() if now is None else now
+        with self._lock:
+            return bool(self.samples) and now - self.samples[-1][0] <= 2.0
+
     def feed(self, line: str, now: float | None = None) -> None:
         vals = parse_line(line)
-        if "dist" not in vals and "lcd" not in vals:
+        if not vals:
             return
         now = time.monotonic() if now is None else now
         with self._lock:
@@ -156,6 +188,7 @@ class FakeSerialMonitor(SerialMonitor):
     def __init__(self):
         super().__init__(port="none")
         self.fake_connected = False
+        self.fake_port: str | None = "COM_FAKE"
 
     @property
     def connected(self) -> bool:  # type: ignore[override]

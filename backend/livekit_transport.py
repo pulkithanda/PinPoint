@@ -83,6 +83,9 @@ class LiveKitTransport(CallTransport):
         self._room = None
         self._asrc = self._vsrc = None
         self._play_q: asyncio.Queue | None = None
+        self._playing = False
+        self._interrupt = False
+        self._speech_starts = self._speech_starts_read = 0
         self._stt = None
         self._last_video_out = 0.0
         self._stop = threading.Event()
@@ -216,7 +219,7 @@ class LiveKitTransport(CallTransport):
         from backend.stt import Transcriber
 
         if self._stt is None:
-            self._stt = Transcriber(self.transcripts.put, self.stt_model)
+            self._stt = Transcriber(self.transcripts.put, self.stt_model, on_speech_start=self._on_speech_start)
         stream = self._rtc.AudioStream(track, sample_rate=16000, num_channels=1)
         async for ev in stream:
             self._stt.feed_pcm(np.frombuffer(ev.frame.data, np.int16), 16000)
@@ -248,15 +251,46 @@ class LiveKitTransport(CallTransport):
     def send_beep(self, wav: bytes) -> None:
         self.send_speech("", wav)
 
+    # ------------------------------------------------------------ barge-in
+    def _on_speech_start(self) -> None:
+        """The caller started talking (STT thread or event loop)."""
+        with self._lock:
+            self._speech_starts += 1
+
+    def poll_barge_in(self) -> bool:
+        with self._lock:
+            seen = self._speech_starts != self._speech_starts_read
+            self._speech_starts_read = self._speech_starts
+        return seen
+
+    @property
+    def speaking(self) -> bool:
+        return self._playing or (self._play_q is not None and not self._play_q.empty())
+
+    def stop_speech(self) -> None:
+        """Cut Pinpoint off mid-sentence and drop anything queued (the caller is talking)."""
+        def _stop():
+            while self._play_q is not None and not self._play_q.empty():
+                self._play_q.get_nowait()
+            if self._playing:
+                self._interrupt = True
+        self._submit(_stop)
+
     async def _player(self) -> None:
         rtc, chunk = self._rtc, OUT_RATE // 100  # 10 ms frames
         while True:
             pcm = await self._play_q.get()
+            self._playing, self._interrupt = True, False
             for i in range(0, len(pcm), chunk):
+                if self._interrupt:
+                    if hasattr(self._asrc, "clear_queue"):
+                        self._asrc.clear_queue()  # drop audio already buffered for sending
+                    break
                 part = pcm[i:i + chunk]
                 if len(part) < chunk:
                     part = np.pad(part, (0, chunk - len(part)))
                 await self._asrc.capture_frame(rtc.AudioFrame(part.tobytes(), OUT_RATE, 1, chunk))
+            self._playing = self._interrupt = False
 
     def send_video_frame(self, frame_bgr: np.ndarray) -> None:
         now = time.monotonic()

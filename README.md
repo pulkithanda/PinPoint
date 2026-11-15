@@ -40,7 +40,37 @@ There are two output modes:
 | `backend/hardware/serial_monitor.py` | Reads `dist=… lcd=…` from the Arduino and diagnoses wrong ports |
 | `backend/projects/*.yaml` | Build steps (proximity alert; colour reader is a stretch goal) |
 | `arduino/proximity_alert/` | The sketch, uploaded before the demo |
-| `tools/` | Model download, marker PDF, port calibration, terminal simulator, `chert_setup` (check keys, register iMessage webhook), `fake_bridge` (pretend to be Chert for local tests) |
+| `backend/build/` | Elegoo flow: kit catalog, breadboard model + plan checker, Claude planner, project library, build engine |
+| `backend/build_session.py` | One call in the Elegoo flow: planner, photo checks, arduino-cli upload, USB test |
+| `tools/` | Model download, marker PDF, port calibration, terminal simulators (`sim_terminal` Elegoo, `sim_grove`), `setup_arduino`, `chert_setup` (check keys, register iMessage webhook), `fake_bridge` (pretend to be Chert for local tests) |
+
+## Elegoo kit: build anything the judge asks for (default)
+
+With `PINPOINT_KIT=elegoo` (the default), Pinpoint works with an ELEGOO UNO R3 Most Complete starter kit
+and a breadboard, and nothing is scripted:
+
+1. **"What would you like to build today?"** The caller describes anything ("something that beeps when my
+   cat gets near the snacks").
+2. **Claude designs it** from the parts in the kit (`backend/build/elegoo_most_complete.yaml`): parts, every
+   wire, and the Arduino sketch. Code then checks the plan (`backend/build/board.py`): no shorts, a resistor
+   on every LED, no floating legs, one lead per hole, everything within rows 1-30 so it can be counted by
+   touch. Problems go back to Claude to fix (up to twice). If it still isn't safe, or Claude is offline,
+   Pinpoint offers the closest of 15 hand-checked projects (`backend/build/library.yaml`: 5 beginner, 10
+   advanced). Requests the kit can't do safely (mains power, heating) are politely declined with an
+   alternative.
+3. **Pinpoint reads the plan back** and asks "Shall we build it?". The caller can say yes, or ask for changes.
+4. **Wiring by touch**, one step at a time: "Put the long leg into row 10, counting 10 from the left end, the
+   hole right beside the groove, on your side." A setup photo learns how the board is facing; each part is
+   photo-checked (resistors are identified by their colour bands); a final photo checks the whole circuit.
+5. **Pinpoint programs the Arduino itself** with arduino-cli (the sketch is compiled, and fixed by Claude if
+   needed, while the caller is still wiring), then **tests it over USB** ("cover the light sensor...") and
+   says "It works!". The recap and the sketch arrive by iMessage.
+
+Setup, once per laptop: install arduino-cli (`winget install ArduinoSA.CLI`), then
+`python -m tools.setup_arduino` (AVR core + libraries, compiles every library project as a check).
+
+Rehearse without a phone: `python -m tools.sim_terminal` (real Claude planner) or `--offline` (library
+only). The Grove Base Shield flow is still there: `PINPOINT_KIT=grove`, simulator `python -m tools.sim_grove`.
 
 ## Run it with Chert, step by step
 
@@ -55,9 +85,13 @@ How the call works ([Chert docs](https://docs.trychert.com/facetime/introduction
 python -m venv .venv
 .venv\Scripts\activate            # macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
-python -m tools.download_models   # hand-tracking model
+python -m tools.download_models   # optional pre-download; otherwise fetched automatically on startup
 ```
 The Whisper speech model (~140 MB) downloads on the first call.
+On Debian/Ubuntu Linux hosts (including remote development containers), install MediaPipe's native graphics libraries and eSpeak NG for generated call audio:
+```bash
+sudo apt-get update && sudo apt-get install -y libegl1 libgles2 espeak-ng
+```
 
 **2. Get keys and fill in `.env`** (copy `.env.example`):
 - **LiveKit:** create a free project at [cloud.livekit.io](https://cloud.livekit.io). Copy the `wss://` URL, API key and API secret.
